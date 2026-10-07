@@ -1,5 +1,6 @@
-# Serves the page and a read-only slice of the Prometheus HTTP API (instant + range queries, GET only).
-# PROMETHEUS_URL is filled in by the image's envsubst step at startup.
+# Serves the page and read-only slices of the Prometheus API (instant + range queries) and the
+# Alertmanager API (alert list, for silences). GET only.
+# PROMETHEUS_URL / ALERTMANAGER_URL are filled in by the image's envsubst step at startup.
 server {
     listen 8080;
     server_name _;
@@ -20,6 +21,14 @@ server {
     location ~ ^/api/v1/(query|query_range)$ {
         limit_except GET { deny all; }
         proxy_pass ${PROMETHEUS_URL};
+        proxy_set_header Cookie "";
+        proxy_set_header Authorization "";
+        proxy_read_timeout 15s;
+    }
+
+    location = /alertmanager/api/v2/alerts {
+        limit_except GET { deny all; }
+        proxy_pass ${ALERTMANAGER_URL}/api/v2/alerts;
         proxy_set_header Cookie "";
         proxy_set_header Authorization "";
         proxy_read_timeout 15s;

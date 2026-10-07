@@ -160,10 +160,10 @@ const LQ = {
   nasDisks:   'count(unraid_disk_ok)',
   nasRx:      'rate(node_network_receive_bytes_total{instance="tower",device="bond0"}[2m])',
   nasTx:      'rate(node_network_transmit_bytes_total{instance="tower",device="bond0"}[2m])',
-  alerts:     'ALERTS{alertstate="firing",severity=~"critical|warning"}',
+  alerts:     'ALERTS{alertstate="firing",severity=~"critical|warning"}',   // fallback when Alertmanager is unreachable
 };
-// Alerts the face already shows through its own events.
-const COVERED_ALERTS = new Set(['Watchdog', 'KubePodCrashLooping', 'KubeNodeNotReady', 'KubeNodeUnreachable', 'KubeJobFailed']);
+// Alerts the face already shows through its own events (silencing them still mutes those events).
+const COVERED_ALERTS = new Set(['Watchdog', 'KubePodCrashLooping', 'KubeNodeNotReady', 'KubeNodeUnreachable', 'KubeJobFailed', 'HomelabBackupFailed']);
 
 /* ------------------------------- mock data ------------------------------- */
 const NODES = [
@@ -193,6 +193,7 @@ const S = {
   sites: SITES.map((h, i) => ({ host: h, up: true, cert: 34 + (i * 11) % 50 })),
   nfs: { rx: 0, tx: 0 },
   alerts: [],
+  silenced: [],   // label sets of silenced/inhibited alerts
   stale: false,
 };
 if (!MOCK) Object.assign(S, {
@@ -275,6 +276,13 @@ const val = x => +x.value[1];
 const by = (rows, label) => Object.fromEntries((rows || []).map(x => [x.metric[label], val(x)]));
 const humanize = name => name.replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2').replace(/([a-z\d])([A-Z])/g, '$1 $2');
 
+// Alertmanager knows about silences and inhibitions; Prometheus' ALERTS series doesn't.
+async function amAlerts() {
+  const r = await fetch('alertmanager/api/v2/alerts?active=true&silenced=true&inhibited=true', { cache: 'no-store' });
+  if (!r.ok) throw new Error(`alertmanager HTTP ${r.status}`);
+  return (await r.json()).map(a => ({ labels: a.labels, suppressed: a.status.state === 'suppressed' }));
+}
+
 async function livePoll() {
   const keys = Object.keys(LQ);
   const res = await Promise.allSettled(keys.map(k => prom('query', { query: LQ[k] })));
@@ -318,9 +326,17 @@ async function livePoll() {
     parity: R.nasParity?.[0] && val(R.nasParity[0]) === 1 ? { pct: null } : null,
   } : null;
   S.nfs = R.nasRx?.[0] && R.nasTx?.[0] ? { rx: val(R.nasRx[0]) / 1e6, tx: val(R.nasTx[0]) / 1e6 } : null;
-  S.alerts = (R.alerts || []).filter(a => !COVERED_ALERTS.has(a.metric.alertname)).map(a => ({
-    name: humanize(a.metric.alertname), sev: a.metric.severity,
-    detail: a.metric.disk || a.metric.device || a.metric.namespace || a.metric.instance || '',
+  let alerts;
+  try { alerts = await amAlerts(); }
+  catch (e) {
+    alerts = (R.alerts || []).map(a => ({ labels: a.metric, suppressed: false }));
+    pollErr = [pollErr, `${e.message}, silences ignored`].filter(Boolean).join(' · ');
+  }
+  alerts = alerts.filter(a => /^(critical|warning)$/.test(a.labels.severity || ''));
+  S.silenced = alerts.filter(a => a.suppressed).map(a => a.labels);
+  S.alerts = alerts.filter(a => !a.suppressed && !COVERED_ALERTS.has(a.labels.alertname)).map(({ labels: l }) => ({
+    name: humanize(l.alertname), sev: l.severity,
+    detail: l.disk || l.device || l.namespace || l.instance || '',
   }));
 }
 
@@ -341,16 +357,20 @@ async function liveHistory() {
 const SHORT = { crash: 'crashloop', nodeDown: 'node down', alarm: 'site', backupFail: 'backup failed', fluxFail: 'flux failed',
   hot: 'hot', cpu: 'cpu', parity: 'parity', backup: 'backup', fluxRec: 'flux', torrent: 'torrents', stale: 'no data' };
 
+// True if an alert with this name and these labels is silenced/inhibited in Alertmanager.
+const silenced = (name, match) => S.silenced.some(l => l.alertname === name && Object.entries(match).every(([k, v]) => l[k] === v));
+
 function events() {
   const ev = [];
   if (S.stale) ev.push({ id: 'stale', prio: 99, sev: 'bad', label: "can't reach Prometheus" });
-  S.pods.bad.forEach(p => ev.push({ id: 'crash', prio: 100, sev: 'bad', label: `${p.ns}/${p.name} · ${p.reason}` }));
-  S.nodes.filter(n => !n.ready).forEach(n => ev.push({ id: 'nodeDown', prio: 95, sev: 'bad', label: `${n.name} is NotReady` }));
+  S.pods.bad.filter(p => !silenced('KubePodCrashLooping', { namespace: p.ns, pod: p.name })).forEach(p => ev.push({ id: 'crash', prio: 100, sev: 'bad', label: `${p.ns}/${p.name} · ${p.reason}` }));
+  S.nodes.filter(n => !n.ready && !silenced('KubeNodeNotReady', { node: n.name }) && !silenced('KubeNodeUnreachable', { node: n.name })).forEach(n => ev.push({ id: 'nodeDown', prio: 95, sev: 'bad', label: `${n.name} is NotReady` }));
   S.sites?.filter(s => !s.up).forEach(s => ev.push({ id: 'alarm', prio: 90, sev: 'bad', label: `${s.host} is down` }));
   S.alerts.forEach(a => ev.push({ id: 'alarm', prio: a.sev === 'critical' ? 88 : 70, sev: a.sev === 'critical' ? 'bad' : 'warn',
     label: a.name + (a.detail ? ` · ${a.detail}` : '') }));
   S.sites?.filter(s => s.up && s.cert <= 7).forEach(s => ev.push({ id: 'alarm', prio: 85, sev: 'warn', label: `${s.host} cert expires in ${s.cert} days` }));
-  if (S.backup.failed) ev.push({ id: 'backupFail', prio: 80, sev: 'warn', label: `${S.backup.failed}: last run failed` });
+  const bkMuted = S.silenced.some(l => l.alertname === 'HomelabBackupFailed' && (l.job_name || '').startsWith(S.backup.failed + '-'));
+  if (S.backup.failed && !bkMuted) ev.push({ id: 'backupFail', prio: 80, sev: 'warn', label: `${S.backup.failed}: last run failed` });
   S.flux?.failed.forEach(k => ev.push({ id: 'fluxFail', prio: 75, sev: 'warn', label: `flux: kustomization ${k} not ready` }));
   const up = S.nodes.filter(n => n.ready && !Number.isNaN(n.temp));
   const hot = up.reduce((a, b) => (!a || b.temp > a.temp ? b : a), null);
@@ -626,7 +646,8 @@ function hud() {
   else if (lead) { text = lead.label; tc = sevCol[lead.sev]; }
   else {
     const ready = S.nodes.filter(n => n.ready).length;
-    text = `all good · ${ready}/${S.nodes.length} nodes · ${S.pods.total} pods` + (S.sites ? ` · ${S.sites.filter(s => s.up).length}/${S.sites.length} sites` : '');
+    text = `all good · ${ready}/${S.nodes.length} nodes · ${S.pods.total} pods` + (S.sites ? ` · ${S.sites.filter(s => s.up).length}/${S.sites.length} sites` : '') +
+      (S.silenced.length ? ` · ${S.silenced.length} silenced` : '');
   }
   ctx.textAlign = 'center'; ctx.font = '500 22px Inter, system-ui, sans-serif'; ctx.fillStyle = tc;
   ctx.fillText(text, 640, 380);
@@ -880,7 +901,7 @@ function readout() {
   const sec = Math.max(0, Math.ceil((IDLE_MS - (performance.now() - lastInput)) / 1000));
   $('#readout').textContent =
     `emote: ${emote}${isNight() ? '   (night)' : ''}   page: ${page + 1}/4${page ? `   back to face in ${sec}s` : ''}\n` +
-    `events: ${evs.length ? evs.map(e => `${e.id}[${e.prio}]`).join('  ') : 'none'}\n` +
+    `events: ${evs.length ? evs.map(e => `${e.id}[${e.prio}]`).join('  ') : 'none'}${S.silenced.length ? `   silenced: ${S.silenced.map(l => l.alertname).join(', ')}` : ''}\n` +
     (MOCK ? 'data: mock' : `data: live · updated ${lastPoll ? Math.round((Date.now() - lastPoll) / 1000) + 's ago' : 'never'}${pollErr ? ' · ' + pollErr : ''}`);
 }
 
