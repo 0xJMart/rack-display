@@ -279,7 +279,7 @@ function simTick() {
 }
 
 /* ------------------------------ live data ------------------------------ */
-let lastPoll = 0, pollErr = '', fluxUnknownBefore = new Set();
+let lastPoll = 0, pollErr = '', fluxBefore = { failed: new Set(), busy: new Set() };
 async function prom(path, params) {
   const r = await fetch(`api/v1/${path}?` + new URLSearchParams(params), { cache: 'no-store' });
   const j = await r.json().catch(() => ({}));
@@ -348,15 +348,18 @@ async function livePoll() {
   // The cert's own namespace is exported_namespace; namespace is cert-manager's (the scrape target).
   S.certs = R.certs?.length ? R.certs.map(x => ({ name: `${x.metric.exported_namespace || x.metric.namespace}/${x.metric.name}`, days: Math.floor(val(x)) })) : null;
 
-  // Flux: an object only counts as "reconciling" if it was still Unknown on the previous poll too,
-  // so routine few-second reconciles don't make the face flicker.
+  // Flux: every new commit briefly marks dependents Ready=False/DependencyNotReady and objects
+  // Unknown while they reconcile. Treat DependencyNotReady as waiting, and only count a state
+  // that is still there on the next poll, so routine reconciles don't make the face flicker.
   if (R.flux?.length) {
     const items = R.flux.filter(x => x.metric.suspended !== 'true')
-      .map(x => ({ name: x.metric.name, ready: x.metric.ready }));
-    const unknown = items.filter(i => i.ready === 'Unknown').map(i => i.name);
-    S.flux = { total: items.length, failed: items.filter(i => i.ready === 'False').map(i => i.name),
-      reconciling: unknown.filter(n => fluxUnknownBefore.has(n)) };
-    fluxUnknownBefore = new Set(unknown);
+      .map(x => ({ name: x.metric.name, ready: x.metric.ready, reason: x.metric.reason }));
+    const failedNow = items.filter(i => i.ready === 'False' && i.reason !== 'DependencyNotReady').map(i => i.name);
+    const busyNow = items.filter(i => i.ready === 'Unknown' || i.reason === 'DependencyNotReady').map(i => i.name);
+    S.flux = { total: items.length,
+      failed: failedNow.filter(n => fluxBefore.failed.has(n)),
+      reconciling: busyNow.filter(n => fluxBefore.busy.has(n)) };
+    fluxBefore = { failed: new Set(failedNow), busy: new Set(busyNow) };
   } else S.flux = null;
 
   // unpoller: PoE watts per switch port, and which port each node is on (UniFi client name = hostname)
