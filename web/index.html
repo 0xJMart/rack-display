@@ -345,7 +345,8 @@ async function livePoll() {
     host: new URL(x.metric.instance).host, up: val(x) === 1,
     cert: siteCert[x.metric.instance] != null ? Math.floor(siteCert[x.metric.instance]) : null,
   })).sort((a, b) => a.host.localeCompare(b.host)) : null;
-  S.certs = R.certs?.length ? R.certs.map(x => ({ name: `${x.metric.namespace}/${x.metric.name}`, days: Math.floor(val(x)) })) : null;
+  // The cert's own namespace is exported_namespace; namespace is cert-manager's (the scrape target).
+  S.certs = R.certs?.length ? R.certs.map(x => ({ name: `${x.metric.exported_namespace || x.metric.namespace}/${x.metric.name}`, days: Math.floor(val(x)) })) : null;
 
   // Flux: an object only counts as "reconciling" if it was still Unknown on the previous poll too,
   // so routine few-second reconciles don't make the face flicker.
