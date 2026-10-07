@@ -1,0 +1,932 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rack Face</title>
+<!--
+  Rack display: 1280×400 animated face + swipe pages for the homelab mini rack.
+  Live mode (default) polls Prometheus through ./api/v1/ (proxied read-only by nginx).
+  URL params:
+    ?mock                  fake data + debug toggles for every event (works from file://)
+    ?kiosk                 1:1, no debug panel, no cursor (what the Pi will load)
+    ?scenario=backup,cpu   mock mode: start with events on (ids in SCENARIOS below)
+    ?time=night|day        force day/night (default: auto, night 23:00–07:00)
+    ?page=0..3             start page
+    ?glow=0                turn off the glow (cheaper on the Pi if needed)
+    ?demo                  mock mode: cycle through every emote
+    ?snap                  no easing (for headless screenshots)
+-->
+<style>
+:root{
+  --bg:#000; --fg:#e6f1f6; --dim:#73848e; --line:#1a2329; --panel:#090e11;
+  --good:#5ef2a0; --info:#4de1ff; --warn:#ffb547; --bad:#ff4d6d;
+  --s:1;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:#101316;color:var(--fg);font-family:Inter,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+body{padding:16px}
+#wrap{width:calc(1280px * var(--s));height:calc(400px * var(--s));margin:0 auto}
+#stage{width:1280px;height:400px;background:var(--bg);position:relative;overflow:hidden;transform:scale(var(--s));transform-origin:0 0;touch-action:none;user-select:none;-webkit-user-select:none;border-radius:6px;transition:filter 2s}
+#stage.night{filter:brightness(.45)}
+body.kiosk{padding:0;background:#000;cursor:none}
+body.kiosk #wrap{margin:0}
+body.kiosk #stage{border-radius:0}
+body.kiosk #debug{display:none}
+
+#track{display:flex;width:5120px;height:400px;will-change:transform}
+#track.snap{transition:transform .34s cubic-bezier(.2,.8,.2,1)}
+.page{width:1280px;height:400px;flex:none;position:relative;overflow:hidden}
+#face{width:1280px;height:400px;display:block}
+#dots{position:absolute;left:0;right:0;bottom:9px;display:flex;justify-content:center;gap:10px;pointer-events:none}
+#dots i{width:7px;height:7px;border-radius:50%;background:#253037;transition:background .3s}
+#dots i.on{background:#8ea3ae}
+#dots{transition:opacity .6s}
+#dots.hide{opacity:0}
+
+.pad{padding:26px 32px 34px;height:100%}
+.k{font-size:13px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim)}
+.num{font-variant-numeric:tabular-nums}
+
+/* page 2: numbers */
+.tiles{display:grid;grid-template-columns:repeat(6,1fr);gap:14px;height:222px}
+.tile{background:var(--panel);border:1px solid var(--line);border-top:3px solid var(--good);border-radius:14px;padding:16px 18px 14px;display:flex;flex-direction:column;justify-content:space-between;min-width:0}
+.tile .v{font-size:60px;font-weight:650;line-height:1;font-variant-numeric:tabular-nums}
+.tile .v small{font-size:24px;color:var(--dim);font-weight:500;margin-left:2px}
+.tile .s{font-size:15px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile.warn{border-top-color:var(--warn)} .tile.warn .v{color:var(--warn)}
+.tile.bad{border-top-color:var(--bad)} .tile.bad .v{color:var(--bad)}
+.tile.info{border-top-color:var(--info)}
+.strip{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:14px;height:98px}
+.cell{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px 18px;display:flex;flex-direction:column;justify-content:space-between;min-width:0}
+.cell .v{font-size:24px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+.cell .v span{color:var(--dim);font-weight:500;font-size:18px}
+
+/* page 3: nodes */
+.nodes{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;height:100%}
+.node{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px 16px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.nh{display:flex;align-items:center;gap:9px;font-size:19px;font-weight:600;margin-bottom:4px}
+.nh .np{margin-left:auto;font-size:13px;color:var(--dim);font-weight:500}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--good);flex:none}
+.dot.warn{background:var(--warn)} .dot.bad{background:var(--bad)} .dot.info{background:var(--info)}
+.metric{display:flex;justify-content:space-between;align-items:baseline}
+.metric .mv{font-size:20px;font-weight:600;font-variant-numeric:tabular-nums}
+.node canvas{width:100%;height:46px;display:block}
+.bar{height:8px;border-radius:4px;background:#172026;overflow:hidden;margin:3px 0 6px}
+.bar i{display:block;height:100%;background:#6f8fa0;border-radius:4px}
+.nf{display:flex;justify-content:space-between;font-size:15px;color:var(--dim);margin-top:auto}
+.node.down{opacity:.55}
+
+/* page 4: services */
+.svc{display:grid;grid-template-columns:1.35fr 1fr;gap:28px}
+.svc .h{margin-bottom:8px}
+.row{display:flex;align-items:center;gap:12px;height:35px;border-bottom:1px solid var(--line);font-size:18px}
+.row .grow{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .r{color:var(--dim);font-variant-numeric:tabular-nums;font-size:16px}
+.row .r.warn{color:var(--warn)} .row .r.bad{color:var(--bad)} .row .r.info{color:var(--info)}
+
+/* debug panel (hidden in ?kiosk) */
+#debug{width:min(1280px,100%);margin:18px auto 0;font-size:14px;color:#aab8c0}
+#debug .grp{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:10px}
+#debug b{color:#dfe9ee;font-weight:600;min-width:64px}
+#debug button{font:inherit;color:#cfdbe1;background:#1a2126;border:1px solid #2a353c;border-radius:999px;padding:5px 12px;cursor:pointer}
+#debug button:hover{border-color:#4a5a63}
+#debug button.on{background:#123a46;border-color:#4de1ff;color:#fff}
+#debug button.sev-bad.on{background:#45131f;border-color:var(--bad)}
+#debug button.sev-warn.on{background:#3d2c0d;border-color:var(--warn)}
+#readout{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;color:#8fa3ad;background:#0b0f12;border:1px solid #1d262c;border-radius:8px;padding:8px 12px;white-space:pre-wrap}
+#debug p{color:#6d7d86;margin:8px 0 0;line-height:1.5}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="stage">
+    <div id="track">
+      <div class="page" id="p-face"><canvas id="face"></canvas></div>
+      <div class="page" id="p-num"></div>
+      <div class="page" id="p-nodes"></div>
+      <div class="page" id="p-svc"></div>
+    </div>
+    <div id="dots"><i></i><i></i><i></i><i></i></div>
+  </div>
+</div>
+
+<div id="debug">
+  <div class="grp"><b>Events</b><span id="scen" style="display:contents"></span></div>
+  <div class="grp"><b>Time</b>
+    <button data-time="auto">Auto</button><button data-time="day">Day</button><button data-time="night">Night</button>
+    <b style="margin-left:18px">Other</b>
+    <button id="demo">Demo cycle</button><button id="tapbtn">Tap face</button><button id="clear">Clear events</button>
+  </div>
+  <div id="readout"></div>
+  <p>Drag or swipe the screen to change page. Click the face to tap it. Arrow keys also work. The screen goes back to the face after 60 s idle.
+     Events can stack: the most important one drives the face, the rest show as chips top-left.
+     <code>?mock</code> = fake data with a toggle for every event · <code>?kiosk</code> = 1:1 like the Pi · <code>?scenario=backup,torrent</code> · <code>?time=night</code> · <code>?glow=0</code></p>
+</div>
+
+<script>
+'use strict';
+const $ = s => document.querySelector(s);
+const TAU = Math.PI * 2;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const rand = (a, b) => a + Math.random() * (b - a);
+const Q = new URLSearchParams(location.search);
+const KIOSK = Q.has('kiosk');
+const MOCK = Q.has('mock') || location.protocol === 'file:';
+const GLOW = Q.get('glow') !== '0';
+const SNAP = Q.has('snap');   // screenshots: skip easing, jump straight to the emote
+const IDLE_MS = 60_000;
+if (KIOSK) document.body.classList.add('kiosk');
+
+/* ----------------------------- live queries ------------------------------
+   Instant queries polled every 15 s. Not wired yet (no metrics in the cluster):
+   Flux status, sites/certs (blackbox exporter), PoE (unpoller), torrents
+   (transmission exporter). Those tiles show "—" until the exporters exist.
+--------------------------------------------------------------------------- */
+const NODE_JOIN = q => `(${q}) * on(instance) group_left(nodename) node_uname_info{job="node-exporter"}`;
+const LQ = {
+  ready:      'kube_node_status_condition{condition="Ready",status="true"}',
+  cpu:        NODE_JOIN('1 - avg by (instance) (rate(node_cpu_seconds_total{job="node-exporter",mode="idle"}[2m]))'),
+  temp:       NODE_JOIN('max by (instance) (node_thermal_zone_temp{job="node-exporter",type="cpu-thermal"})'),
+  mem:        NODE_JOIN('1 - node_memory_MemAvailable_bytes{job="node-exporter"} / node_memory_MemTotal_bytes{job="node-exporter"}'),
+  pods:       'sum by (node) (kube_pod_info * on(namespace, pod) group_left() (kube_pod_status_phase{phase="Running"} == 1))',
+  bad:        'kube_pod_container_status_waiting_reason{reason=~"CrashLoopBackOff|ImagePullBackOff|ErrImagePull|CreateContainerConfigError|InvalidImageName"} == 1',
+  bkActive:   'kube_cronjob_status_active{namespace="backup"}',
+  bkOkAge:    'time() - kube_cronjob_status_last_successful_time{namespace="backup"}',
+  bkSchedAge: 'time() - kube_cronjob_status_last_schedule_time{namespace="backup"}',
+  nasStarted: 'unraid_array_started',
+  nasParity:  'unraid_parity_check_running',
+  nasDisabled:'unraid_array_disks_disabled',
+  nasDisks:   'count(unraid_disk_ok)',
+  nasRx:      'rate(node_network_receive_bytes_total{instance="tower",device="bond0"}[2m])',
+  nasTx:      'rate(node_network_transmit_bytes_total{instance="tower",device="bond0"}[2m])',
+  alerts:     'ALERTS{alertstate="firing",severity=~"critical|warning"}',
+};
+// Alerts the face already shows through its own events.
+const COVERED_ALERTS = new Set(['Watchdog', 'KubePodCrashLooping', 'KubeNodeNotReady', 'KubeNodeUnreachable', 'KubeJobFailed']);
+
+/* ------------------------------- mock data ------------------------------- */
+const NODES = [
+  { name: 'control-node', port: 1, base: .12, pods: 15 },
+  { name: 'node-1',       port: 2, base: .08, pods: 14 },
+  { name: 'node-2',       port: 3, base: .10, pods: 14 },
+  { name: 'node-3',       port: 4, base: .05, pods: 7 },
+];
+const SITES = ['home', 'keycloak', 'nextcloud', 'vaultwarden', 'media', 'seerr', 'unifi', 'arize-app'].map(h => h + '.joe-cloud.com');
+// Order the CronJobs actually run in (23:00, 23:30, 00:00); db-backup steps through apps.
+const BACKUP_STEPS = [
+  ['k0s-backup', 'k0s'], ['db-backup', 'vaultwarden'], ['db-backup', 'keycloak-postgres'], ['db-backup', 'nextcloud'],
+  ['db-backup', '0xnetworth'], ['db-backup', 'sonarr'], ['db-backup', 'radarr'], ['offsite-backup', 'restic → S3'],
+];
+
+const HIST = 120;
+const S = {
+  nodes: NODES.map(n => ({ ...n, ready: true, cpu: n.base, temp: 47, mem: rand(.3, .45), poe: 5.4, hCpu: [], hTemp: [] })),
+  pods: { total: 50, bad: [] },
+  flux: { total: 14, reconciling: [], failed: [] },
+  backup: {
+    running: null, step: 0, failed: null,
+    jobs: { 'k0s-backup': { age: 20.1, ok: true }, 'db-backup': { age: 19.6, ok: true }, 'offsite-backup': { age: 19.1, ok: true } },
+  },
+  torrents: { active: 0, down: 0, up: 0, pct: 12 },
+  nas: { array: 'Started', disks: 6, disabled: 0, parity: null },   // parity: null | { pct: number|null }
+  sites: SITES.map((h, i) => ({ host: h, up: true, cert: 34 + (i * 11) % 50 })),
+  nfs: { rx: 0, tx: 0 },
+  alerts: [],
+  stale: false,
+};
+if (!MOCK) Object.assign(S, {
+  nodes: [], pods: { total: 0, bad: [] }, flux: null, backup: { running: null, failed: null, jobs: {} },
+  torrents: null, nas: null, sites: null, nfs: null,
+});
+
+const SCENARIOS = [
+  { id: 'backup',    label: 'Backup running',   sev: 'info' },
+  { id: 'torrent',   label: 'Torrents',         sev: 'info' },
+  { id: 'fluxRec',   label: 'Flux reconciling', sev: 'info' },
+  { id: 'parity',    label: 'Parity check',     sev: 'info' },
+  { id: 'cpu',       label: 'High CPU',         sev: 'warn' },
+  { id: 'hot',       label: 'Pi hot',           sev: 'warn' },
+  { id: 'backupFail',label: 'Backup failed',    sev: 'warn' },
+  { id: 'fluxFail',  label: 'Flux failed',      sev: 'warn' },
+  { id: 'cert',      label: 'Cert expiring',    sev: 'warn' },
+  { id: 'crash',     label: 'Pod crashloop',    sev: 'bad' },
+  { id: 'nodeDown',  label: 'Node down',        sev: 'bad' },
+  { id: 'siteDown',  label: 'Site down',        sev: 'bad' },
+];
+const on = new Set((Q.get('scenario') || '').split(',').filter(Boolean));
+let timeMode = Q.get('time') || 'auto';
+
+function push(arr, v) { arr.push(v); if (arr.length > HIST) arr.shift(); }
+
+function simTick() {
+  S.nodes.forEach((n, i) => {
+    n.ready = !(on.has('nodeDown') && n.name === 'node-2');
+    let target = n.base + (on.has('cpu') ? .8 : 0) + (on.has('backup') && i === 0 ? .2 : 0) + (on.has('torrent') && i === 2 ? .12 : 0);
+    if (!n.ready) target = 0;
+    n.cpu = clamp(n.cpu + (target - n.cpu) * .6 + rand(-.025, .025), 0, 1);   // fast so debug toggles show within ~2 s
+    const tt = 43 + n.cpu * 26 + (on.has('hot') && n.name === 'node-1' ? 33 : 0);
+    n.temp += (tt - n.temp) * .6 + rand(-.3, .3);
+    n.mem = clamp(n.mem + rand(-.004, .004), .2, .9);
+    n.poe = n.ready ? 4.7 + n.cpu * 5 + rand(0, .3) : 0;
+    push(n.hCpu, n.ready ? n.cpu : 0); push(n.hTemp, n.ready ? n.temp : NaN);
+  });
+
+  S.pods.bad = on.has('crash') ? [{ ns: 'nextcloud', name: 'nextcloud-7c9f8d6b5-x2kqp', reason: 'CrashLoopBackOff' }] : [];
+  S.flux.reconciling = on.has('fluxRec') ? ['apps'] : [];
+  S.flux.failed = on.has('fluxFail') ? ['media-servarr'] : [];
+
+  for (const j of Object.values(S.backup.jobs)) j.age += 1 / 3600;
+  if (on.has('backup')) {
+    const r = S.backup.running ||= { job: BACKUP_STEPS[S.backup.step][0], what: BACKUP_STEPS[S.backup.step][1], pct: 0 };
+    r.pct += 4;
+    if (r.pct >= 100) {
+      S.backup.jobs[r.job] = { age: 0, ok: true };
+      S.backup.step = (S.backup.step + 1) % BACKUP_STEPS.length;
+      S.backup.running = null;
+    }
+  } else S.backup.running = null;
+  S.backup.failed = on.has('backupFail') ? 'db-backup' : null;
+  if (S.backup.failed) S.backup.jobs['db-backup'].ok = false;
+  else if (!S.backup.jobs['db-backup'].ok) S.backup.jobs['db-backup'].ok = true;
+
+  const t = S.torrents;
+  if (on.has('torrent')) { t.active = 3; t.down = clamp(t.down + rand(-3, 3.5), 6, 32); t.up = rand(.6, 1.8); t.pct = (t.pct + .5) % 100; }
+  else { t.active = 0; t.down = 0; t.up = 0; }
+
+  S.nas.parity = on.has('parity') ? { pct: ((S.nas.parity?.pct ?? 0) + .5) % 100 } : null;
+  S.sites.forEach(s => {
+    s.up = !(on.has('siteDown') && s.host.startsWith('vaultwarden'));
+    if (s.host.startsWith('keycloak')) s.cert = on.has('cert') ? 5 : 61;
+  });
+  S.nfs.rx = (t.active ? t.down * .9 : 0) + rand(.1, .6);
+  S.nfs.tx = (S.backup.running ? rand(35, 55) : 0) + rand(.05, .3);
+}
+
+/* ------------------------------ live data ------------------------------ */
+let lastPoll = 0, pollErr = '';
+async function prom(path, params) {
+  const r = await fetch(`api/v1/${path}?` + new URLSearchParams(params), { cache: 'no-store' });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.status !== 'success') throw new Error(j.error || `HTTP ${r.status}`);
+  return j.data.result;
+}
+const val = x => +x.value[1];
+const by = (rows, label) => Object.fromEntries((rows || []).map(x => [x.metric[label], val(x)]));
+const humanize = name => name.replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2').replace(/([a-z\d])([A-Z])/g, '$1 $2');
+
+async function livePoll() {
+  const keys = Object.keys(LQ);
+  const res = await Promise.allSettled(keys.map(k => prom('query', { query: LQ[k] })));
+  const R = {};
+  keys.forEach((k, i) => { R[k] = res[i].status === 'fulfilled' ? res[i].value : null; });
+  const failed = res.filter(r => r.status === 'rejected');
+  S.stale = failed.length === res.length;
+  pollErr = failed.length ? `${failed.length}/${res.length} queries failed (${failed[0].reason.message})` : '';
+  if (S.stale) return;
+  lastPoll = Date.now();
+
+  const ready = by(R.ready, 'node'), cpu = by(R.cpu, 'nodename'), temp = by(R.temp, 'nodename');
+  const mem = by(R.mem, 'nodename'), pods = by(R.pods, 'node');
+  const names = Object.keys(ready).sort((a, b) => (a === 'control-node' ? -1 : b === 'control-node' ? 1 : a.localeCompare(b)));
+  S.nodes = names.map(name => {
+    const old = S.nodes.find(n => n.name === name);
+    return { name, port: null, poe: null, hCpu: old?.hCpu || [], hTemp: old?.hTemp || [],
+      ready: ready[name] === 1, cpu: cpu[name] ?? 0, temp: temp[name] ?? NaN, mem: mem[name] ?? 0, pods: pods[name] ?? 0 };
+  });
+  S.pods.total = Object.values(pods).reduce((a, b) => a + b, 0);
+  S.pods.bad = (R.bad || []).map(x => ({ ns: x.metric.namespace, name: x.metric.pod, reason: x.metric.reason }));
+
+  // A CronJob that was scheduled after its last success and isn't running any more has failed.
+  const active = by(R.bkActive, 'cronjob'), okAge = by(R.bkOkAge, 'cronjob'), schedAge = by(R.bkSchedAge, 'cronjob');
+  const jobs = {};
+  let running = null, failedJob = null;
+  for (const name of Object.keys({ ...active, ...okAge, ...schedAge }).sort()) {
+    const isActive = active[name] > 0;
+    const failed = !isActive && schedAge[name] > 120 && (okAge[name] == null || schedAge[name] < okAge[name]);
+    jobs[name] = { age: (okAge[name] ?? NaN) / 3600, ok: !failed };
+    if (isActive && !running) running = { job: name, what: `started ${Math.max(1, Math.round((schedAge[name] || 0) / 60))}m ago`, pct: null };
+    if (failed && !failedJob) failedJob = name;
+  }
+  S.backup = { jobs, running, failed: failedJob };
+
+  const arr = R.nasStarted?.[0];
+  S.nas = arr ? {
+    array: val(arr) === 1 && (arr.metric.state || 'STARTED') === 'STARTED' ? 'Started' : 'Stopped',
+    disks: R.nasDisks?.[0] ? val(R.nasDisks[0]) : null,
+    disabled: R.nasDisabled?.[0] ? val(R.nasDisabled[0]) : 0,
+    parity: R.nasParity?.[0] && val(R.nasParity[0]) === 1 ? { pct: null } : null,
+  } : null;
+  S.nfs = R.nasRx?.[0] && R.nasTx?.[0] ? { rx: val(R.nasRx[0]) / 1e6, tx: val(R.nasTx[0]) / 1e6 } : null;
+  S.alerts = (R.alerts || []).filter(a => !COVERED_ALERTS.has(a.metric.alertname)).map(a => ({
+    name: humanize(a.metric.alertname), sev: a.metric.severity,
+    detail: a.metric.disk || a.metric.device || a.metric.namespace || a.metric.instance || '',
+  }));
+}
+
+// CPU/temp graphs: last hour at 30 s steps, refreshed every minute.
+async function liveHistory() {
+  const end = Math.floor(Date.now() / 1000), start = end - (HIST - 1) * 30;
+  const [c, t] = await Promise.all([LQ.cpu, LQ.temp].map(q => prom('query_range', { query: q, start, end, step: 30 }).catch(() => null)));
+  const fill = (rows, key) => (rows || []).forEach(r => {
+    const n = S.nodes.find(x => x.name === r.metric.nodename);
+    if (!n) return;
+    const m = new Map(r.values.map(([ts, v]) => [Math.round((ts - start) / 30), +v]));
+    n[key] = Array.from({ length: HIST }, (_, i) => (m.has(i) ? m.get(i) : NaN));
+  });
+  fill(c, 'hCpu'); fill(t, 'hTemp');
+}
+
+/* -------------------------- events → emote ----------------------------- */
+const SHORT = { crash: 'crashloop', nodeDown: 'node down', alarm: 'site', backupFail: 'backup failed', fluxFail: 'flux failed',
+  hot: 'hot', cpu: 'cpu', parity: 'parity', backup: 'backup', fluxRec: 'flux', torrent: 'torrents', stale: 'no data' };
+
+function events() {
+  const ev = [];
+  if (S.stale) ev.push({ id: 'stale', prio: 99, sev: 'bad', label: "can't reach Prometheus" });
+  S.pods.bad.forEach(p => ev.push({ id: 'crash', prio: 100, sev: 'bad', label: `${p.ns}/${p.name} · ${p.reason}` }));
+  S.nodes.filter(n => !n.ready).forEach(n => ev.push({ id: 'nodeDown', prio: 95, sev: 'bad', label: `${n.name} is NotReady` }));
+  S.sites?.filter(s => !s.up).forEach(s => ev.push({ id: 'alarm', prio: 90, sev: 'bad', label: `${s.host} is down` }));
+  S.alerts.forEach(a => ev.push({ id: 'alarm', prio: a.sev === 'critical' ? 88 : 70, sev: a.sev === 'critical' ? 'bad' : 'warn',
+    label: a.name + (a.detail ? ` · ${a.detail}` : '') }));
+  S.sites?.filter(s => s.up && s.cert <= 7).forEach(s => ev.push({ id: 'alarm', prio: 85, sev: 'warn', label: `${s.host} cert expires in ${s.cert} days` }));
+  if (S.backup.failed) ev.push({ id: 'backupFail', prio: 80, sev: 'warn', label: `${S.backup.failed}: last run failed` });
+  S.flux?.failed.forEach(k => ev.push({ id: 'fluxFail', prio: 75, sev: 'warn', label: `flux: kustomization ${k} not ready` }));
+  const up = S.nodes.filter(n => n.ready && !Number.isNaN(n.temp));
+  const hot = up.reduce((a, b) => (!a || b.temp > a.temp ? b : a), null);
+  if (hot && hot.temp >= 75) ev.push({ id: 'hot', prio: 60, sev: 'warn', label: `${hot.name} is at ${hot.temp.toFixed(0)}°C` });
+  const avg = up.reduce((a, n) => a + n.cpu, 0) / Math.max(1, up.length);
+  if (avg > .7 || up.some(n => n.cpu > .92)) ev.push({ id: 'cpu', prio: 55, sev: 'warn', label: `cluster CPU ${Math.round(avg * 100)}%` });
+  const par = S.nas?.parity;
+  if (par) ev.push({ id: 'parity', prio: 40, sev: 'info', label: par.pct != null ? `NAS parity check ${par.pct.toFixed(1)}%` : 'NAS parity check running',
+    progress: par.pct != null ? par.pct / 100 : null });
+  if (S.backup.running) {
+    const r = S.backup.running;
+    ev.push({ id: 'backup', prio: 35, sev: 'info', label: `${r.job} · ${r.what}`, progress: r.pct != null ? r.pct / 100 : null });
+  }
+  S.flux?.reconciling.forEach(k => ev.push({ id: 'fluxRec', prio: 30, sev: 'info', label: `flux reconciling ${k}…` }));
+  if (S.torrents?.active) ev.push({ id: 'torrent', prio: 20, sev: 'info',
+    label: `${S.torrents.active} torrents · ↓ ${S.torrents.down.toFixed(1)} MB/s · ↑ ${S.torrents.up.toFixed(1)} MB/s`, progress: S.torrents.pct / 100 });
+  return ev.sort((a, b) => b.prio - a.prio);
+}
+
+function isNight() {
+  if (timeMode !== 'auto') return timeMode === 'night';
+  const h = new Date().getHours();
+  return h >= 23 || h < 7;
+}
+
+/* Face parameters. Every number is eased toward the active emote's values,
+   so any emote can blend into any other. */
+const BASE = { w: 190, h: 210, r: 58, sep: 205, lid: 0, tilt: 0, happy: 0, closeL: 0, closeR: 0, x: 0, gx: 0, gy: 0,
+  mW: 0, mC: 0, mO: 0, jit: 0, sweat: 0, blush: 0, zzz: 0, box: 0, arrows: 0, stars: 0, think: 0, bang: 0, glasses: 0, dim: 0, prog: 0 };
+const EMO = {
+  idle:       { col: '#4de1ff', mW: 54, mC: .35 },
+  tap:        { col: '#ff8fd0', happy: .75, mW: 120, mC: 1, h: 200 },
+  sleep:      { col: '#4a7dff', closeL: 1, closeR: 1, zzz: 1, gx: 0, gy: .3, dim: 1 },
+  backup:     { col: '#5ef2a0', lid: .26, gx: .4, gy: .4, box: 1, mW: 36, mC: .1, prog: 1 },
+  torrent:    { col: '#b48cff', lid: .12, gx: 0, gy: .6, arrows: 1, mW: 30, mC: .3, h: 200, prog: 1 },
+  fluxRec:    { col: '#4de1ff', gx: .5, gy: -.6, think: 1, mW: 34, mC: 0 },
+  parity:     { col: '#38d9c4', lid: .28, gx: 0, gy: .35, glasses: 1, mW: 36, mC: .1, prog: 1 },
+  cpu:        { col: '#ff9a3d', lid: .3, tilt: .2, jit: 1, sweat: 1, mW: 92, mC: -.1 },
+  hot:        { col: '#ff7a59', lid: .42, tilt: -.1, blush: 1, mO: .55 },
+  backupFail: { col: '#ffb547', lid: .16, tilt: -.34, sweat: 1, mW: 70, mC: -.6 },
+  fluxFail:   { col: '#ffb547', lid: .46, tilt: .36, mW: 80, mC: -.15 },
+  alarm:      { col: '#ff4d6d', w: 172, h: 250, bang: 1, mO: 1 },
+  nodeDown:   { col: '#ff8a4d', closeR: 1, lid: .1, tilt: -.16, mW: 70, mC: -.45 },
+  crash:      { col: '#ff4d6d', x: 1, stars: 1, mO: .8 },
+  stale:      { col: '#8b98a0', lid: .3, tilt: -.18, gx: 0, gy: .2, think: 1, mW: 46, mC: -.25 },
+};
+// While asleep, the top info event still shows faintly ("dreaming" about it).
+const DREAM = { backup: 'box', torrent: 'arrows', parity: 'glasses', fluxRec: 'think' };
+
+/* ------------------------------- face ---------------------------------- */
+const W = 1280, H = 400;
+const cv = $('#face'), ctx = cv.getContext('2d');
+const layer = document.createElement('canvas'), lx = layer.getContext('2d');
+let SCALE = 1, PR = 1;
+
+const P = { ...BASE };
+let col = hex2rgb(EMO.idle.col);
+let emote = 'idle', evs = [], lead = null;
+let T = 0, last = 0, lastRender = 0;
+let blinkT = -1, nextBlink = 2, nextSacc = 1, sacc = { x: 0, y: 0 }, breath = 0;
+let tapUntil = 0, awakeUntil = 0, bounceT = -9;
+
+function hex2rgb(h) { const n = parseInt(h.slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; }
+const rgb = (c, a = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+
+function sizeCanvas() {
+  PR = Math.min(2, (devicePixelRatio || 1) * SCALE);
+  for (const c of [cv, layer]) { c.width = Math.round(W * PR); c.height = Math.round(H * PR); }
+}
+
+function pickEmote(now) {
+  evs = events();
+  lead = evs[0] || null;
+  let e = lead ? lead.id : 'idle';
+  if (isNight() && (!lead || lead.sev === 'info') && now > awakeUntil) e = 'sleep';
+  if (now < tapUntil) e = 'tap';
+  emote = e;
+}
+
+function update(dt) {
+  pickEmote(T);
+  const def = EMO[emote];
+  const tgt = { ...BASE, ...def };
+  if (emote === 'sleep' && lead && DREAM[lead.id]) tgt[DREAM[lead.id]] = .55;
+  if (emote === 'sleep' && lead && lead.progress != null) tgt.prog = .5;
+  if (emote === 'tap' && lead?.progress != null) tgt.prog = 1;
+
+  // idle gaze: glance somewhere every few seconds unless the emote pins the eyes
+  if (T > nextSacc) {
+    sacc = Math.random() < .35 ? { x: 0, y: 0 } : { x: rand(-.6, .6), y: rand(-.35, .3) };
+    nextSacc = T + rand(1.5, 4.5);
+  }
+  if (def.gx === undefined) { tgt.gx = sacc.x; tgt.gy = sacc.y; }
+
+  const k = SNAP ? 1 : 1 - Math.exp(-dt * 7), kg = SNAP ? 1 : 1 - Math.exp(-dt * 14);
+  for (const key in BASE) P[key] += (tgt[key] - P[key]) * (key === 'gx' || key === 'gy' ? kg : k);
+  const c = hex2rgb(def.col);
+  for (let i = 0; i < 3; i++) col[i] += (c[i] - col[i]) * k;
+
+  if (T > nextBlink && blinkT < 0) { blinkT = T; }
+  if (blinkT >= 0 && T - blinkT > .17) { blinkT = -1; nextBlink = T + (Math.random() < .2 ? .25 : rand(2.2, 6)); }
+
+  const up = S.nodes.filter(n => n.ready);
+  const avg = up.reduce((a, n) => a + n.cpu, 0) / Math.max(1, up.length);
+  breath += dt * TAU / (emote === 'sleep' ? 5.5 : 4.2 - 2.6 * avg);
+}
+
+function blinkAmt() {
+  if (blinkT < 0 || emote === 'sleep' || P.x > .5) return 0;
+  return Math.sin(Math.PI * clamp((T - blinkT) / .17, 0, 1));
+}
+
+function draw() {
+  const dx = Math.sin(T / 97) * 14, dy = Math.sin(T / 131) * 6;          // slow drift against burn-in
+  const bounce = T - bounceT < .5 ? -Math.sin((T - bounceT) / .5 * Math.PI) * 22 : 0;
+  const bob = Math.sin(breath) * 5 + bounce;
+  const jx = P.jit * rand(-3, 3), jy = P.jit * rand(-2, 2);
+  const cx = 640 + dx, cy = 176 + dy + bob;
+  const c = rgb(col);
+  const b = blinkAmt();
+  const eyes = [];
+
+  // eyes + mouth go on a layer so the lids can be cut out, then drawn once with a glow
+  lx.setTransform(1, 0, 0, 1, 0, 0); lx.clearRect(0, 0, layer.width, layer.height);
+  lx.setTransform(PR, 0, 0, PR, 0, 0);
+  lx.fillStyle = c; lx.strokeStyle = c; lx.lineCap = 'round';
+
+  for (const side of [-1, 1]) {
+    const close = Math.max(side < 0 ? P.closeL : P.closeR, b);
+    const ex = cx + side * P.sep + P.gx * 70 + jx, ey = cy + P.gy * 45 + jy;
+    const w = P.w, h = Math.max(14, P.h * (1 - close * .93));
+    const x0 = ex - w / 2, y0 = ey - h / 2 + (P.h - h) * .2;
+    eyes.push({ ex, ey, w, h, x0, y0, side });
+
+    lx.globalCompositeOperation = 'source-over';
+    lx.globalAlpha = 1 - P.x;
+    lx.beginPath(); lx.roundRect(x0, y0, w, h, Math.min(P.r, h / 2)); lx.fill();
+
+    lx.globalCompositeOperation = 'destination-out';
+    lx.globalAlpha = 1;
+    // top lid: tilt > 0 = inner corner lower (angry), < 0 = outer lower (worried)
+    const lidIn = y0 + (P.lid + P.tilt / 2) * h, lidOut = y0 + (P.lid - P.tilt / 2) * h;
+    const yL = side < 0 ? lidOut : lidIn, yR = side < 0 ? lidIn : lidOut, slope = (yR - yL) / w;
+    lx.beginPath();
+    lx.moveTo(x0 - 30, y0 - 80); lx.lineTo(x0 + w + 30, y0 - 80);
+    lx.lineTo(x0 + w + 30, yR + slope * 30); lx.lineTo(x0 - 30, yL - slope * 30);
+    lx.fill();
+    // bottom lid: an ellipse rising from below makes the happy ^ ^ shape
+    if (P.happy > .01) {
+      const ry = h * .55;
+      lx.beginPath(); lx.ellipse(ex, y0 + h - P.happy * h * .6 + ry, w * .8, ry, 0, 0, TAU); lx.fill();
+    }
+    lx.globalCompositeOperation = 'source-over';
+
+    if (P.x > .01) {
+      const s = 60, a = Math.sin(T * 3 + side) * .12;
+      lx.save(); lx.globalAlpha = P.x; lx.translate(ex, ey); lx.rotate(a); lx.lineWidth = 30;
+      lx.beginPath(); lx.moveTo(-s, -s); lx.lineTo(s, s); lx.moveTo(s, -s); lx.lineTo(-s, s); lx.stroke();
+      lx.restore();
+    }
+  }
+  lx.globalAlpha = 1;
+
+  const my = cy + 152;
+  if (P.mW > 6) {
+    lx.lineWidth = 12; lx.beginPath(); lx.moveTo(cx - P.mW / 2, my);
+    lx.quadraticCurveTo(cx, my + P.mC * 36, cx + P.mW / 2, my); lx.stroke();
+  }
+  if (P.mO > .03) { lx.beginPath(); lx.ellipse(cx, my + 4, 9 + P.mO * 14, 3 + P.mO * 19, 0, 0, TAU); lx.fill(); }
+
+  // composite
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, cv.width, cv.height);
+  if (GLOW) { ctx.shadowColor = rgb(col, .75); ctx.shadowBlur = 38 * PR; }
+  ctx.drawImage(layer, 0, 0);
+  ctx.shadowBlur = 0;
+  ctx.setTransform(PR, 0, 0, PR, 0, 0);
+
+  props(cx, cy, eyes);
+  hud();
+
+  if (P.dim > .01) { ctx.fillStyle = `rgba(0,0,0,${P.dim * .35})`; ctx.fillRect(0, 0, W, H); }
+}
+
+function props(cx, cy, eyes) {
+  const [L, R] = eyes;
+
+  if (P.glasses > .02) {   // half-moon reading glasses
+    ctx.save(); ctx.globalAlpha = P.glasses; ctx.strokeStyle = '#c9d6dd'; ctx.lineWidth = 8;
+    for (const e of eyes) { ctx.beginPath(); ctx.roundRect(e.x0 - 20, e.ey - 8, e.w + 40, P.h / 2 + 34, [8, 8, 46, 46]); ctx.stroke(); }
+    ctx.beginPath(); ctx.moveTo(L.x0 + L.w + 20, L.ey + 6); ctx.quadraticCurveTo(cx, L.ey - 14, R.x0 - 20, R.ey + 6); ctx.stroke();
+    ctx.restore();
+  }
+
+  if (P.blush > .02) {
+    ctx.fillStyle = `rgba(255,80,110,${.42 * P.blush})`;
+    for (const e of eyes) { ctx.beginPath(); ctx.ellipse(e.ex + e.side * 38, cy + 132, 50, 15, 0, 0, TAU); ctx.fill(); }
+  }
+
+  if (P.sweat > .02) {
+    const f = (T * .9) % 1, x = R.x0 + R.w + 34, y = R.y0 + 4 + f * 70;
+    ctx.fillStyle = `rgba(130,215,255,${P.sweat * (1 - f * .7)})`;
+    ctx.beginPath(); ctx.moveTo(x, y - 22); ctx.quadraticCurveTo(x + 13, y - 2, x + 11, y + 4);
+    ctx.arc(x, y + 4, 11, 0, Math.PI); ctx.quadraticCurveTo(x - 13, y - 2, x, y - 22); ctx.fill();
+  }
+
+  if (P.zzz > .02) {
+    ctx.fillStyle = rgb(col); ctx.textAlign = 'center';
+    for (let i = 0; i < 3; i++) {
+      const f = (T * .28 + i / 3) % 1;
+      ctx.globalAlpha = P.zzz * Math.sin(f * Math.PI);
+      ctx.font = `700 ${20 + f * 30}px Inter, system-ui, sans-serif`;
+      ctx.fillText('z', R.x0 + R.w + 40 + f * 70, cy - 30 - f * 110);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  if (P.box > .02) {   // a little parcel the face is carrying/eyeing
+    const bx = R.x0 + R.w + 70, by = cy + 70 + Math.sin(T * 3) * 4;
+    ctx.save(); ctx.globalAlpha = P.box;
+    ctx.fillStyle = '#c99356'; ctx.beginPath(); ctx.roundRect(bx, by, 84, 62, 6); ctx.fill();
+    ctx.fillStyle = '#a8763f'; ctx.fillRect(bx, by, 84, 12);
+    ctx.fillStyle = '#ecd2a2'; ctx.fillRect(bx + 36, by, 12, 62);
+    ctx.restore();
+  }
+
+  if (P.arrows > .02) {  // downloads raining down at the sides
+    ctx.save(); ctx.strokeStyle = rgb(col); ctx.lineWidth = 7; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    const cols = [120, 230, 1050, 1160], speed = .35 + S.torrents.down / 60;
+    for (let i = 0; i < 12; i++) {
+      const f = (T * speed + i * .29) % 1, x = cols[i % 4] + (i % 3) * 8, y = 30 + f * 300;
+      ctx.globalAlpha = P.arrows * Math.sin(f * Math.PI) * .9;
+      ctx.beginPath(); ctx.moveTo(x, y - 26); ctx.lineTo(x, y); ctx.moveTo(x - 13, y - 12); ctx.lineTo(x, y); ctx.lineTo(x + 13, y - 12); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  if (P.stars > .02) {   // dizzy stars orbiting the head
+    for (let i = 0; i < 5; i++) {
+      const a = T * 2.4 + i * TAU / 5, depth = (Math.sin(a) + 1) / 2;
+      star(cx + Math.cos(a) * 330, cy - 128 + Math.sin(a) * 26, 9 + depth * 7, `rgba(255,224,102,${P.stars * (.45 + depth * .55)})`);
+    }
+  }
+
+  if (P.think > .02) {   // thought dots up-right, where the eyes are looking
+    const n = Math.floor(T * 1.6) % 4;
+    for (let i = 0; i < 3; i++) {
+      ctx.fillStyle = rgb(col, P.think * (i < n ? 1 : .18));
+      ctx.beginPath(); ctx.arc(R.x0 + R.w + 40 + i * 42, cy - 40 - i * 34, 8 + i * 4, 0, TAU); ctx.fill();
+    }
+  }
+
+  if (P.bang > .02) {
+    const s = 1 + Math.sin(T * 10) * .06;
+    ctx.save(); ctx.fillStyle = `rgba(255,77,109,${P.bang})`; ctx.font = '800 96px Inter, system-ui, sans-serif'; ctx.textAlign = 'center';
+    for (const sx of [-1, 1]) { ctx.save(); ctx.translate(cx + sx * 430, cy + 30); ctx.rotate(sx * .18); ctx.scale(s, s); ctx.fillText('!', 0, 0); ctx.restore(); }
+    ctx.restore();
+  }
+}
+
+function star(x, y, r, fill) {
+  ctx.fillStyle = fill; ctx.beginPath();
+  for (let i = 0; i < 10; i++) { const a = -Math.PI / 2 + i * Math.PI / 5, rr = i % 2 ? r * .45 : r; ctx.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr); }
+  ctx.closePath(); ctx.fill();
+}
+
+function hud() {
+  // label + progress under the face
+  const sevCol = { bad: '#ff8197', warn: '#ffc978', info: '#b9c7cf' };
+  let text = '', tc = '#5f6f78';
+  if (emote === 'tap') text = 'hi!';
+  else if (emote === 'sleep') text = lead ? lead.label : '';
+  else if (lead) { text = lead.label; tc = sevCol[lead.sev]; }
+  else {
+    const ready = S.nodes.filter(n => n.ready).length;
+    text = `all good · ${ready}/${S.nodes.length} nodes · ${S.pods.total} pods` + (S.sites ? ` · ${S.sites.filter(s => s.up).length}/${S.sites.length} sites` : '');
+  }
+  ctx.textAlign = 'center'; ctx.font = '500 22px Inter, system-ui, sans-serif'; ctx.fillStyle = tc;
+  ctx.fillText(text, 640, 380);
+
+  if (P.prog > .02 && lead && lead.progress != null) {
+    const w = 360, x = 640 - w / 2, y = 344;
+    ctx.globalAlpha = P.prog;
+    ctx.fillStyle = '#18222a'; ctx.beginPath(); ctx.roundRect(x, y, w, 7, 4); ctx.fill();
+    ctx.fillStyle = rgb(col); ctx.beginPath(); ctx.roundRect(x, y, Math.max(7, w * lead.progress), 7, 4); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  // other active events as chips, top-left
+  const others = [...new Set(evs.filter(e => e !== lead).map(e => e.id))].map(id => evs.find(e => e.id === id));
+  let x = 22;
+  ctx.font = '600 15px Inter, system-ui, sans-serif'; ctx.textAlign = 'left';
+  for (const e of others.slice(0, 5)) {
+    const label = SHORT[e.id], w = ctx.measureText(label).width + 30;
+    ctx.fillStyle = '#10171c'; ctx.beginPath(); ctx.roundRect(x, 16, w, 28, 14); ctx.fill();
+    ctx.fillStyle = { bad: '#ff4d6d', warn: '#ffb547', info: '#4de1ff' }[e.sev];
+    ctx.beginPath(); ctx.arc(x + 13, 30, 4.5, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#b3c2ca'; ctx.fillText(label, x + 23, 35);
+    x += w + 8;
+  }
+
+  // clock, top-right
+  const d = new Date();
+  ctx.textAlign = 'right'; ctx.font = '500 18px Inter, system-ui, sans-serif'; ctx.fillStyle = '#4e5d66';
+  ctx.fillText(d.toTimeString().slice(0, 5), W - 22, 36);
+}
+
+/* ------------------------------- pages --------------------------------- */
+function buildPages() {
+  $('#p-num').innerHTML = `<div class="pad">
+    <div class="tiles">${['nodes', 'pods', 'flux', 'nas', 'poe', 'sites'].map(k =>
+      `<div class="tile" id="t-${k}"><div class="k"></div><div class="v"></div><div class="s"></div></div>`).join('')}</div>
+    <div class="strip">${['tor', 'bak', 'nfs'].map(k =>
+      `<div class="cell" id="c-${k}"><div class="k"></div><div class="v"></div></div>`).join('')}</div></div>`;
+
+  $('#p-svc').innerHTML = `<div class="pad svc">
+    <div><div class="k h">Sites · blackbox</div><div id="sites"></div></div>
+    <div><div class="k h">Backups · CronJobs</div><div id="baks"></div>
+      <div class="k h" style="margin-top:22px">NAS</div><div id="nasrow"></div></div></div>`;
+}
+
+let nodesSig = null;
+function buildNodes() {
+  nodesSig = S.nodes.map(n => n.name).join();
+  $('#p-nodes').innerHTML = `<div class="pad"><div class="nodes">${S.nodes.map((n, i) => `
+    <div class="node" id="n-${i}">
+      <div class="nh"><span class="dot"></span><span>${n.name}</span><span class="np">${n.port ? `PoE port ${n.port}` : ''}</span></div>
+      <div class="metric"><span class="k">CPU</span><span class="mv" data-f="cpu"></span></div><canvas data-f="cpuc"></canvas>
+      <div class="metric"><span class="k">Temp</span><span class="mv" data-f="temp"></span></div><canvas data-f="tempc"></canvas>
+      <div class="metric"><span class="k">Memory</span><span class="mv" data-f="mem"></span></div><div class="bar"><i data-f="memb"></i></div>
+      <div class="nf"><span data-f="pods"></span><span data-f="poe"></span></div>
+    </div>`).join('')}</div></div>`;
+  document.querySelectorAll('.node canvas').forEach(c => { c.width = 520; c.height = 92; });
+}
+
+const fmtAge = h => h < 1 ? `${Math.max(1, Math.round(h * 60))}m ago` : h < 48 ? `${Math.round(h)}h ago` : `${Math.round(h / 24)}d ago`;
+const f = (el, k) => el.querySelector(`[data-f="${k}"]`);
+
+function tile(id, k, v, s, sev = '') {
+  const el = $('#t-' + id); el.className = 'tile ' + sev;
+  el.children[0].textContent = k; el.children[1].innerHTML = v; el.children[2].textContent = s;
+}
+function cell(id, k, v) { const el = $('#c-' + id); el.children[0].textContent = k; el.children[1].innerHTML = v; }
+
+const DASH = '—';
+function renderPages() {
+  if (S.nodes.map(n => n.name).join() !== nodesSig) buildNodes();
+  const ready = S.nodes.filter(n => n.ready), down = S.nodes.filter(n => !n.ready);
+  tile('nodes', 'Nodes', `${ready.length}<small>/${S.nodes.length}</small>`, down.length ? `${down.map(n => n.name).join(', ')} down` : 'all Ready', down.length ? 'bad' : '');
+  tile('pods', 'Pods failing', S.pods.bad.length, S.pods.bad.length ? S.pods.bad[0].reason : `${S.pods.total} running`, S.pods.bad.length ? 'bad' : '');
+  if (S.flux) {
+    const fr = S.flux.total - S.flux.failed.length;
+    tile('flux', 'Flux', `${fr}<small>/${S.flux.total}</small>`,
+      S.flux.failed.length ? `${S.flux.failed[0]} failed` : S.flux.reconciling.length ? `reconciling ${S.flux.reconciling[0]}` : 'all reconciled',
+      S.flux.failed.length ? 'warn' : S.flux.reconciling.length ? 'info' : '');
+  } else tile('flux', 'Flux', DASH, 'no metrics yet');
+
+  const nas = S.nas;
+  if (!nas) tile('nas', 'NAS', DASH, 'no metrics');
+  else if (nas.array !== 'Started') tile('nas', 'NAS', 'Down', 'array stopped', 'bad');
+  else {
+    const p = nas.parity;
+    const sub = [nas.disks != null && !nas.disabled && !p ? `${nas.disks} disks` : null, nas.disabled ? `${nas.disabled} disabled` : null,
+      p ? (p.pct != null ? `parity ${p.pct.toFixed(0)}%` : 'parity check') : null].filter(Boolean).join(' · ');
+    tile('nas', 'NAS', 'Up', sub, nas.disabled ? 'warn' : p ? 'info' : '');
+  }
+
+  const poeKnown = S.nodes.filter(n => n.poe != null);
+  if (poeKnown.length) tile('poe', 'PoE draw', `${poeKnown.reduce((a, n) => a + n.poe, 0).toFixed(1)}<small>W</small>`, 'of 202 W · ports 1–4');
+  else tile('poe', 'PoE draw', DASH, 'needs unpoller');
+
+  if (S.sites) {
+    const sitesUp = S.sites.filter(s => s.up).length, minCert = Math.min(...S.sites.map(s => s.cert));
+    tile('sites', 'Sites up', `${sitesUp}<small>/${S.sites.length}</small>`,
+      sitesUp < S.sites.length ? `${S.sites.find(s => !s.up).host.split('.')[0]} down` : `certs ≥ ${minCert} days`,
+      sitesUp < S.sites.length ? 'bad' : minCert <= 7 ? 'warn' : '');
+  } else tile('sites', 'Sites up', DASH, 'needs blackbox');
+
+  const t = S.torrents;
+  cell('tor', 'Torrents', !t ? `${DASH} <span>· needs exporter</span>` :
+    t.active ? `↓ ${t.down.toFixed(1)} MB/s <span>· ↑ ${t.up.toFixed(1)} · ${t.active} active</span>` : `idle <span>· transmission</span>`);
+  const r = S.backup.running, ages = Object.values(S.backup.jobs).map(j => j.age).filter(a => !Number.isNaN(a));
+  cell('bak', 'Backups', r ? `${r.job} <span>· ${r.what}${r.pct != null ? ` ${r.pct}%` : ''}</span>` :
+    S.backup.failed ? `<b style="color:var(--warn)">${S.backup.failed} failed</b>` :
+    ages.length ? `all OK <span>· last ${fmtAge(Math.min(...ages))}</span>` : DASH);
+  cell('nfs', 'NAS traffic', S.nfs ? `↓ ${S.nfs.rx.toFixed(1)} <span>MB/s</span> &nbsp;↑ ${S.nfs.tx.toFixed(1)} <span>MB/s</span>` : DASH);
+
+  S.nodes.forEach((n, i) => {
+    const el = $('#n-' + i);
+    const hasT = !Number.isNaN(n.temp);
+    el.classList.toggle('down', !n.ready);
+    el.querySelector('.dot').className = 'dot ' + (!n.ready ? 'bad' : n.temp >= 75 || n.cpu > .9 ? 'warn' : '');
+    f(el, 'cpu').textContent = n.ready ? `${Math.round(n.cpu * 100)}%` : DASH;
+    f(el, 'temp').textContent = n.ready && hasT ? `${n.temp.toFixed(0)}°C` : DASH;
+    f(el, 'temp').style.color = n.temp >= 75 && n.ready ? 'var(--warn)' : '';
+    f(el, 'mem').textContent = n.ready ? `${Math.round(n.mem * 100)}%` : DASH;
+    f(el, 'memb').style.width = (n.ready ? n.mem * 100 : 0) + '%';
+    f(el, 'pods').textContent = n.ready ? `${n.pods} pods` : 'NotReady';
+    f(el, 'poe').textContent = n.poe != null ? `${n.poe.toFixed(1)} W` : '';
+    spark(f(el, 'cpuc'), n.hCpu, 0, 1, '#4de1ff');
+    spark(f(el, 'tempc'), n.hTemp, 35, 85, n.temp >= 75 ? '#ffb547' : '#ff9a7a');
+  });
+
+  $('#sites').innerHTML = !S.sites ? `<div class="row"><span class="dot info"></span><span class="grow" style="color:var(--dim)">blackbox exporter not set up yet</span></div>` :
+    S.sites.map(s => {
+      const sev = !s.up ? 'bad' : s.cert <= 7 ? 'warn' : '';
+      return `<div class="row"><span class="dot ${!s.up ? 'bad' : ''}"></span><span class="grow">${s.host}</span>
+        <span class="r ${sev}">${s.up ? `cert ${s.cert}d` : 'DOWN'}</span></div>`;
+    }).join('');
+  $('#baks').innerHTML = Object.entries(S.backup.jobs).map(([name, j]) => {
+    const running = r && r.job === name;
+    const sev = running ? 'info' : j.ok ? '' : 'warn';
+    return `<div class="row"><span class="dot ${sev}"></span><span class="grow">${name}</span>
+      <span class="r ${sev}">${running ? `running · ${r.what}` : !j.ok ? 'FAILED' : Number.isNaN(j.age) ? 'never' : fmtAge(j.age)}</span></div>`;
+  }).join('') || `<div class="row"><span class="grow" style="color:var(--dim)">no backup CronJobs found</span></div>`;
+  $('#nasrow').innerHTML = !nas ? `<div class="row"><span class="grow" style="color:var(--dim)">no NAS metrics</span></div>` :
+    `<div class="row"><span class="dot ${nas.array !== 'Started' ? 'bad' : nas.disabled ? 'warn' : nas.parity ? 'info' : ''}"></span>
+      <span class="grow">Tower · array ${nas.array}</span>
+      <span class="r ${nas.disabled ? 'warn' : nas.parity ? 'info' : ''}">${[
+        nas.disabled ? `${nas.disabled} disk${nas.disabled > 1 ? 's' : ''} disabled` : null,
+        nas.parity ? (nas.parity.pct != null ? `parity ${nas.parity.pct.toFixed(1)}%` : 'parity check running') : null,
+      ].filter(Boolean).join(' · ') || 'parity valid'}</span></div>`;
+}
+
+function spark(c, arr, lo, hi, color) {
+  const g = c.getContext('2d'), w = c.width, h = c.height;
+  g.clearRect(0, 0, w, h);
+  if (arr.length < 2) return;
+  const X = i => (i / (HIST - 1)) * w, Y = v => h - 4 - clamp((v - lo) / (hi - lo), 0, 1) * (h - 8);
+  const off = HIST - arr.length;
+  g.beginPath();
+  arr.forEach((v, i) => { const y = Number.isNaN(v) ? h - 4 : Y(v); i ? g.lineTo(X(i + off), y) : g.moveTo(X(i + off), y); });
+  g.lineWidth = 3; g.strokeStyle = color; g.stroke();
+  g.lineTo(X(HIST - 1), h); g.lineTo(X(off), h); g.closePath();
+  g.fillStyle = color + '22'; g.fill();
+}
+
+/* ---------------------------- swipe + touch ---------------------------- */
+const stage = $('#stage'), track = $('#track'), dots = [...document.querySelectorAll('#dots i')];
+let page = clamp(+Q.get('page') || 0, 0, 3), down = false, moved = false, x0 = 0, ddx = 0, downAt = 0;
+let lastInput = performance.now(), pageChangedAt = 0;
+
+function setPage(p, snap = true) {
+  if (p !== page) pageChangedAt = performance.now();
+  page = clamp(p, 0, 3);
+  track.classList.toggle('snap', snap);
+  track.style.transform = `translateX(${-page * W}px)`;
+  dots.forEach((d, i) => d.classList.toggle('on', i === page));
+  $('#dots').classList.remove('hide');
+}
+function tap() {
+  const now = performance.now() / 1000;
+  tapUntil = now + 2.2; bounceT = now;
+  if (isNight()) awakeUntil = now + 30;      // tapping wakes it up for a bit
+}
+
+stage.addEventListener('pointerdown', e => {
+  stage.setPointerCapture(e.pointerId);
+  down = true; moved = false; x0 = e.clientX; ddx = 0; downAt = performance.now(); lastInput = downAt;
+  track.classList.remove('snap');
+});
+stage.addEventListener('pointermove', e => {
+  if (!down) return;
+  ddx = (e.clientX - x0) / SCALE;
+  if (Math.abs(ddx) > 10) moved = true;
+  if (!moved) return;
+  const edge = (page === 0 && ddx > 0) || (page === 3 && ddx < 0);
+  track.style.transform = `translateX(${-page * W + (edge ? ddx * .3 : ddx)}px)`;
+});
+const release = () => {
+  if (!down) return;
+  down = false; lastInput = performance.now();
+  if (moved) {
+    const v = ddx / (performance.now() - downAt);
+    setPage(ddx < -160 || v < -.45 ? page + 1 : ddx > 160 || v > .45 ? page - 1 : page);
+  } else {
+    if (page === 0) tap();
+    setPage(page);
+  }
+};
+stage.addEventListener('pointerup', release);
+stage.addEventListener('pointercancel', release);
+addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight') setPage(page + 1);
+  else if (e.key === 'ArrowLeft') setPage(page - 1);
+  else if (e.key === 't') tap();
+  else return;
+  lastInput = performance.now();
+});
+
+/* ------------------------------- debug --------------------------------- */
+let demo = Q.has('demo'), demoIdx = -1, demoAt = 0;
+const DEMO_SEQ = [...SCENARIOS.map(s => s.id), 'night', 'tap'];
+
+function buildDebug() {
+  if (!MOCK) {   // live: event toggles only make sense with fake data
+    $('#scen').parentElement.style.display = 'none';
+    $('#demo').style.display = 'none';
+  }
+  $('#scen').innerHTML = SCENARIOS.map(s => `<button data-s="${s.id}" class="sev-${s.sev}">${s.label}</button>`).join('');
+  $('#scen').addEventListener('click', e => {
+    const id = e.target.dataset.s; if (!id) return;
+    demo = false; on.has(id) ? on.delete(id) : on.add(id); simTick(); syncDebug();
+  });
+  document.querySelectorAll('[data-time]').forEach(b => b.onclick = () => { timeMode = b.dataset.time; awakeUntil = 0; syncDebug(); });
+  $('#demo').onclick = () => { demo = !demo; demoAt = 0; syncDebug(); };
+  $('#tapbtn').onclick = () => { tap(); };
+  $('#clear').onclick = () => { demo = false; on.clear(); timeMode = 'auto'; simTick(); syncDebug(); };
+}
+function syncDebug() {
+  document.querySelectorAll('[data-s]').forEach(b => b.classList.toggle('on', on.has(b.dataset.s)));
+  document.querySelectorAll('[data-time]').forEach(b => b.classList.toggle('on', b.dataset.time === timeMode));
+  $('#demo').classList.toggle('on', demo);
+}
+function demoStep(now) {
+  if (!demo || now - demoAt < 7) return;
+  demoAt = now; demoIdx = (demoIdx + 1) % DEMO_SEQ.length;
+  const id = DEMO_SEQ[demoIdx];
+  on.clear(); timeMode = 'day';
+  if (id === 'night') { timeMode = 'night'; on.add('backup'); awakeUntil = 0; }
+  else if (id === 'tap') tap();
+  else on.add(id);
+  simTick(); syncDebug();
+}
+function readout() {
+  if (KIOSK) return;
+  const sec = Math.max(0, Math.ceil((IDLE_MS - (performance.now() - lastInput)) / 1000));
+  $('#readout').textContent =
+    `emote: ${emote}${isNight() ? '   (night)' : ''}   page: ${page + 1}/4${page ? `   back to face in ${sec}s` : ''}\n` +
+    `events: ${evs.length ? evs.map(e => `${e.id}[${e.prio}]`).join('  ') : 'none'}\n` +
+    (MOCK ? 'data: mock' : `data: live · updated ${lastPoll ? Math.round((Date.now() - lastPoll) / 1000) + 's ago' : 'never'}${pollErr ? ' · ' + pollErr : ''}`);
+}
+
+/* -------------------------------- loop --------------------------------- */
+function fit() {
+  SCALE = KIOSK ? 1 : Math.min((innerWidth - 32) / W, 1.5);
+  document.documentElement.style.setProperty('--s', SCALE);
+  sizeCanvas();
+}
+
+function frame(ts) {
+  requestAnimationFrame(frame);
+  if (ts - lastRender < 1000 / 30 - 2) return;          // cap at ~30 fps
+  const dt = Math.min(.1, (ts - (last || ts)) / 1000);
+  last = lastRender = ts; T = ts / 1000;
+  update(dt);
+  // only paint the face while it's (partly) on screen
+  if (page === 0 || down || ts - pageChangedAt < 450) draw();
+}
+
+function tick() {
+  const now = performance.now() / 1000;
+  if (MOCK) { demoStep(now); simTick(); }
+  renderPages();
+  stage.classList.toggle('night', isNight() && now > awakeUntil);
+  if (page !== 0 && !down && performance.now() - lastInput > IDLE_MS) setPage(0);
+  // dots only while navigating; the face page stays clean
+  if (page === 0 && !down && performance.now() - lastInput > 3000) $('#dots').classList.add('hide');
+  readout();
+}
+
+window.rack = { S, on, events };   // poke at it from the devtools console
+addEventListener('resize', fit);
+fit();
+buildPages();
+buildDebug();
+if (MOCK) for (let i = 0; i < HIST; i++) simTick();      // pre-fill history so graphs aren't empty
+else {
+  livePoll().then(liveHistory);
+  setInterval(livePoll, 15_000);
+  setInterval(liveHistory, 60_000);
+}
+tick(); syncDebug();
+setPage(page, false);
+setInterval(tick, 1000);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
