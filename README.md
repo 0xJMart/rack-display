@@ -32,8 +32,12 @@ Pages (swipe): face → status tiles → per-node CPU/temp/memory → sites, bac
 - `kiosk/`: Debian + [cage](https://github.com/cage-kiosk/cage) + seatd + Chromium in kiosk mode,
   run as a privileged pod on the node wired to the screen. Image: `ghcr.io/0xjmart/rack-display/kiosk`.
 
-Both images are built for `linux/arm64` by GitHub Actions on every push to `main`, tagged
-`sha-<short>` and `latest`. Kubernetes manifests live in the (private) Homelab GitOps repo and are
+- `exporters/transmission/`: a tiny stdlib-only Prometheus exporter for Transmission's RPC API
+  (`transmission_up`, speeds, torrents by status, bytes left). No maintained arm64 one exists.
+  Image: `ghcr.io/0xjmart/rack-display/transmission-exporter`.
+
+All images are built for `linux/arm64` by GitHub Actions when their directory changes, tagged
+`main-<run>-<sha>` (sortable, for Flux image automation), `sha-<short>` and `latest`. Kubernetes manifests live in the (private) Homelab GitOps repo and are
 deployed by Flux.
 
 ## Running locally
@@ -58,6 +62,6 @@ docker run -p 8080:8080 -e PROMETHEUS_URL=http://host.docker.internal:9090 rack-
 
 ## Metrics used
 
-kube-state-metrics, node-exporter, `ALERTS`, and `unraid_*` textfile metrics from the NAS. Flux
-status, blackbox probes, UniFi PoE (unpoller) and Transmission aren't wired yet; their tiles show
-"—" until those exporters exist.
+kube-state-metrics (incl. Flux objects via custom resource state), node-exporter, Alertmanager
+(alerts + silences), cert-manager, blackbox probes, unpoller (UniFi PoE), the Transmission exporter
+above, and `unraid_*` textfile metrics from the NAS. Any source that's missing just shows "—".

@@ -3,7 +3,6 @@ name: build
 on:
   push:
     branches: [main]
-    paths: ["web/**", "kiosk/**", ".github/workflows/build.yml"]
   pull_request:
   workflow_dispatch:
 
@@ -11,13 +10,33 @@ permissions:
   contents: read
   packages: write
 
+env:
+  # image name -> build context
+  CONTEXTS: '{"web":"web","kiosk":"kiosk","transmission-exporter":"exporters/transmission"}'
+
 jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      images: ${{ github.event_name == 'workflow_dispatch' && '["web","kiosk","transmission-exporter"]' || steps.filter.outputs.changes }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            web: [web/**, .github/workflows/build.yml]
+            kiosk: [kiosk/**, .github/workflows/build.yml]
+            transmission-exporter: [exporters/transmission/**, .github/workflows/build.yml]
+
   image:
+    needs: changes
+    if: needs.changes.outputs.images != '[]'
     # The cluster is all Raspberry Pi 5, so build natively on arm64.
     runs-on: ubuntu-24.04-arm
     strategy:
       matrix:
-        image: [web, kiosk]
+        image: ${{ fromJSON(needs.changes.outputs.images) }}
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
@@ -31,12 +50,14 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ghcr.io/0xjmart/rack-display/${{ matrix.image }}
+          # main-<run>-<sha> sorts by run number, so Flux image automation picks the newest build.
           tags: |
+            type=raw,value=main-${{ github.run_number }}-{{sha}},enable={{is_default_branch}}
             type=sha,prefix=sha-,format=short
             type=raw,value=latest,enable={{is_default_branch}}
       - uses: docker/build-push-action@v7
         with:
-          context: ${{ matrix.image }}
+          context: ${{ fromJSON(env.CONTEXTS)[matrix.image] }}
           platforms: linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}

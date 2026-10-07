@@ -139,9 +139,8 @@ const IDLE_MS = 60_000;
 if (KIOSK) document.body.classList.add('kiosk');
 
 /* ----------------------------- live queries ------------------------------
-   Instant queries polled every 15 s. Not wired yet (no metrics in the cluster):
-   Flux status, sites/certs (blackbox exporter), PoE (unpoller), torrents
-   (transmission exporter). Those tiles show "—" until the exporters exist.
+   Instant queries polled every 15 s. Any source that returns nothing (exporter
+   missing or down) leaves its tile at "—" instead of failing the page.
 --------------------------------------------------------------------------- */
 const NODE_JOIN = q => `(${q}) * on(instance) group_left(nodename) node_uname_info{job="node-exporter"}`;
 const LQ = {
@@ -161,6 +160,18 @@ const LQ = {
   nasRx:      'rate(node_network_receive_bytes_total{instance="tower",device="bond0"}[2m])',
   nasTx:      'rate(node_network_transmit_bytes_total{instance="tower",device="bond0"}[2m])',
   alerts:     'ALERTS{alertstate="firing",severity=~"critical|warning"}',   // fallback when Alertmanager is unreachable
+  sites:      'probe_success{job=~"probe/.*/sites"}',                          // blackbox exporter
+  siteCert:   '(probe_ssl_earliest_cert_expiry{job=~"probe/.*/sites"} - time()) / 86400',
+  certs:      '(certmanager_certificate_expiration_timestamp_seconds - time()) / 86400',
+  flux:       'gotk_resource_info{customresource_kind=~"Kustomization|HelmRelease"}',  // kube-state-metrics custom resource state
+  poe:        'unpoller_device_port_poe_watts',
+  poeClients: 'unpoller_client_uptime_seconds{wired="true"}',                  // gives each Pi's switch port
+  tUp:        'transmission_up',
+  tDown:      'transmission_download_speed_bytes',
+  tUpRate:    'transmission_upload_speed_bytes',
+  tTorrents:  'transmission_torrents',
+  tSize:      'transmission_downloading_size_bytes',
+  tLeft:      'transmission_downloading_left_bytes',
 };
 // Alerts the face already shows through its own events (silencing them still mutes those events).
 const COVERED_ALERTS = new Set(['Watchdog', 'KubePodCrashLooping', 'KubeNodeNotReady', 'KubeNodeUnreachable', 'KubeJobFailed', 'HomelabBackupFailed']);
@@ -172,7 +183,7 @@ const NODES = [
   { name: 'node-2',       port: 3, base: .10, pods: 14 },
   { name: 'node-3',       port: 4, base: .05, pods: 7 },
 ];
-const SITES = ['home', 'keycloak', 'nextcloud', 'vaultwarden', 'media', 'seerr', 'unifi', 'arize-app'].map(h => h + '.joe-cloud.com');
+const SITES = ['home', 'keycloak', 'nextcloud', 'media', 'rack', 'seerr', 'unifi', 'vaultwarden'].map(h => h + '.joe-cloud.com');
 // Order the CronJobs actually run in (23:00, 23:30, 00:00); db-backup steps through apps.
 const BACKUP_STEPS = [
   ['k0s-backup', 'k0s'], ['db-backup', 'vaultwarden'], ['db-backup', 'keycloak-postgres'], ['db-backup', 'nextcloud'],
@@ -194,11 +205,13 @@ const S = {
   nfs: { rx: 0, tx: 0 },
   alerts: [],
   silenced: [],   // label sets of silenced/inhibited alerts
+  certs: null,    // cert-manager: [{ name, days }]
+  poe: null,      // { total, ports }
   stale: false,
 };
 if (!MOCK) Object.assign(S, {
   nodes: [], pods: { total: 0, bad: [] }, flux: null, backup: { running: null, failed: null, jobs: {} },
-  torrents: null, nas: null, sites: null, nfs: null,
+  torrents: null, nas: null, sites: null, nfs: null, certs: null, poe: null,
 });
 
 const SCENARIOS = [
@@ -230,6 +243,7 @@ function simTick() {
     n.temp += (tt - n.temp) * .6 + rand(-.3, .3);
     n.mem = clamp(n.mem + rand(-.004, .004), .2, .9);
     n.poe = n.ready ? 4.7 + n.cpu * 5 + rand(0, .3) : 0;
+    S.poe = { total: S.nodes.reduce((a, x) => a + (x.poe || 0), 0), ports: S.nodes.length };
     push(n.hCpu, n.ready ? n.cpu : 0); push(n.hTemp, n.ready ? n.temp : NaN);
   });
 
@@ -265,7 +279,7 @@ function simTick() {
 }
 
 /* ------------------------------ live data ------------------------------ */
-let lastPoll = 0, pollErr = '';
+let lastPoll = 0, pollErr = '', fluxUnknownBefore = new Set();
 async function prom(path, params) {
   const r = await fetch(`api/v1/${path}?` + new URLSearchParams(params), { cache: 'no-store' });
   const j = await r.json().catch(() => ({}));
@@ -325,6 +339,41 @@ async function livePoll() {
     disabled: R.nasDisabled?.[0] ? val(R.nasDisabled[0]) : 0,
     parity: R.nasParity?.[0] && val(R.nasParity[0]) === 1 ? { pct: null } : null,
   } : null;
+  // blackbox: one series per probed URL
+  const siteCert = by(R.siteCert, 'instance');
+  S.sites = R.sites?.length ? R.sites.map(x => ({
+    host: new URL(x.metric.instance).host, up: val(x) === 1,
+    cert: siteCert[x.metric.instance] != null ? Math.floor(siteCert[x.metric.instance]) : null,
+  })).sort((a, b) => a.host.localeCompare(b.host)) : null;
+  S.certs = R.certs?.length ? R.certs.map(x => ({ name: `${x.metric.namespace}/${x.metric.name}`, days: Math.floor(val(x)) })) : null;
+
+  // Flux: an object only counts as "reconciling" if it was still Unknown on the previous poll too,
+  // so routine few-second reconciles don't make the face flicker.
+  if (R.flux?.length) {
+    const items = R.flux.filter(x => x.metric.suspended !== 'true')
+      .map(x => ({ name: x.metric.name, ready: x.metric.ready }));
+    const unknown = items.filter(i => i.ready === 'Unknown').map(i => i.name);
+    S.flux = { total: items.length, failed: items.filter(i => i.ready === 'False').map(i => i.name),
+      reconciling: unknown.filter(n => fluxUnknownBefore.has(n)) };
+    fluxUnknownBefore = new Set(unknown);
+  } else S.flux = null;
+
+  // unpoller: PoE watts per switch port, and which port each node is on (UniFi client name = hostname)
+  if (R.poe?.length) {
+    const watts = by(R.poe, 'port_num');
+    const portOf = by((R.poeClients || []).map(x => ({ metric: x.metric, value: [0, x.metric.sw_port] })), 'name');
+    S.poe = { total: Object.values(watts).reduce((a, b) => a + b, 0), ports: Object.keys(watts).length };
+    S.nodes.forEach(n => { n.port = portOf[n.name] || null; n.poe = n.port != null ? watts[n.port] ?? 0 : null; });
+  } else S.poe = null;
+
+  // transmission exporter
+  if (R.tUp?.[0] && val(R.tUp[0]) === 1) {
+    const counts = by(R.tTorrents, 'status'), size = R.tSize?.[0] ? val(R.tSize[0]) : 0, left = R.tLeft?.[0] ? val(R.tLeft[0]) : 0;
+    S.torrents = { active: (counts.downloading || 0) + (counts.download_wait || 0), seeding: counts.seeding || 0,
+      down: (R.tDown?.[0] ? val(R.tDown[0]) : 0) / 1e6, up: (R.tUpRate?.[0] ? val(R.tUpRate[0]) : 0) / 1e6,
+      pct: size ? (size - left) / size * 100 : 0 };
+  } else S.torrents = null;
+
   S.nfs = R.nasRx?.[0] && R.nasTx?.[0] ? { rx: val(R.nasRx[0]) / 1e6, tx: val(R.nasTx[0]) / 1e6 } : null;
   let alerts;
   try { alerts = await amAlerts(); }
@@ -368,7 +417,8 @@ function events() {
   S.sites?.filter(s => !s.up).forEach(s => ev.push({ id: 'alarm', prio: 90, sev: 'bad', label: `${s.host} is down` }));
   S.alerts.forEach(a => ev.push({ id: 'alarm', prio: a.sev === 'critical' ? 88 : 70, sev: a.sev === 'critical' ? 'bad' : 'warn',
     label: a.name + (a.detail ? ` · ${a.detail}` : '') }));
-  S.sites?.filter(s => s.up && s.cert <= 7).forEach(s => ev.push({ id: 'alarm', prio: 85, sev: 'warn', label: `${s.host} cert expires in ${s.cert} days` }));
+  if (S.certs) S.certs.filter(c => c.days <= 7).forEach(c => ev.push({ id: 'alarm', prio: 85, sev: 'warn', label: `${c.name} cert expires in ${c.days} days` }));
+  else S.sites?.filter(s => s.up && s.cert != null && s.cert <= 7).forEach(s => ev.push({ id: 'alarm', prio: 85, sev: 'warn', label: `${s.host} cert expires in ${s.cert} days` }));
   const bkMuted = S.silenced.some(l => l.alertname === 'HomelabBackupFailed' && (l.job_name || '').startsWith(S.backup.failed + '-'));
   if (S.backup.failed && !bkMuted) ev.push({ id: 'backupFail', prio: 80, sev: 'warn', label: `${S.backup.failed}: last run failed` });
   S.flux?.failed.forEach(k => ev.push({ id: 'fluxFail', prio: 75, sev: 'warn', label: `flux: kustomization ${k} not ready` }));
@@ -739,12 +789,12 @@ function renderPages() {
     tile('nas', 'NAS', 'Up', sub, nas.disabled ? 'warn' : p ? 'info' : '');
   }
 
-  const poeKnown = S.nodes.filter(n => n.poe != null);
-  if (poeKnown.length) tile('poe', 'PoE draw', `${poeKnown.reduce((a, n) => a + n.poe, 0).toFixed(1)}<small>W</small>`, 'of 202 W · ports 1–4');
+  if (S.poe) tile('poe', 'PoE draw', `${S.poe.total.toFixed(1)}<small>W</small>`, `of 202 W · ${S.poe.ports} ports`);
   else tile('poe', 'PoE draw', DASH, 'needs unpoller');
 
   if (S.sites) {
-    const sitesUp = S.sites.filter(s => s.up).length, minCert = Math.min(...S.sites.map(s => s.cert));
+    const sitesUp = S.sites.filter(s => s.up).length;
+    const minCert = Math.min(...(S.certs ? S.certs.map(c => c.days) : S.sites.map(s => s.cert ?? Infinity)));
     tile('sites', 'Sites up', `${sitesUp}<small>/${S.sites.length}</small>`,
       sitesUp < S.sites.length ? `${S.sites.find(s => !s.up).host.split('.')[0]} down` : `certs ≥ ${minCert} days`,
       sitesUp < S.sites.length ? 'bad' : minCert <= 7 ? 'warn' : '');
@@ -752,7 +802,8 @@ function renderPages() {
 
   const t = S.torrents;
   cell('tor', 'Torrents', !t ? `${DASH} <span>· needs exporter</span>` :
-    t.active ? `↓ ${t.down.toFixed(1)} MB/s <span>· ↑ ${t.up.toFixed(1)} · ${t.active} active</span>` : `idle <span>· transmission</span>`);
+    t.active ? `↓ ${t.down.toFixed(1)} MB/s <span>· ↑ ${t.up.toFixed(1)} · ${t.active} active</span>` :
+    `idle <span>· ${t.seeding != null ? `${t.seeding} seeding · ↑ ${t.up.toFixed(1)} MB/s` : 'transmission'}</span>`);
   const r = S.backup.running, ages = Object.values(S.backup.jobs).map(j => j.age).filter(a => !Number.isNaN(a));
   cell('bak', 'Backups', r ? `${r.job} <span>· ${r.what}${r.pct != null ? ` ${r.pct}%` : ''}</span>` :
     S.backup.failed ? `<b style="color:var(--warn)">${S.backup.failed} failed</b>` :
@@ -771,6 +822,7 @@ function renderPages() {
     f(el, 'memb').style.width = (n.ready ? n.mem * 100 : 0) + '%';
     f(el, 'pods').textContent = n.ready ? `${n.pods} pods` : 'NotReady';
     f(el, 'poe').textContent = n.poe != null ? `${n.poe.toFixed(1)} W` : '';
+    el.querySelector('.np').textContent = n.port ? `PoE port ${n.port}` : '';
     spark(f(el, 'cpuc'), n.hCpu, 0, 1, '#4de1ff');
     spark(f(el, 'tempc'), n.hTemp, 35, 85, n.temp >= 75 ? '#ffb547' : '#ff9a7a');
   });
@@ -779,7 +831,7 @@ function renderPages() {
     S.sites.map(s => {
       const sev = !s.up ? 'bad' : s.cert <= 7 ? 'warn' : '';
       return `<div class="row"><span class="dot ${!s.up ? 'bad' : ''}"></span><span class="grow">${s.host}</span>
-        <span class="r ${sev}">${s.up ? `cert ${s.cert}d` : 'DOWN'}</span></div>`;
+        <span class="r ${sev}">${!s.up ? 'DOWN' : s.cert != null ? `cert ${s.cert}d` : 'up'}</span></div>`;
     }).join('');
   $('#baks').innerHTML = Object.entries(S.backup.jobs).map(([name, j]) => {
     const running = r && r.job === name;
