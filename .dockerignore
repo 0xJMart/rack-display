@@ -1,0 +1,6 @@
+# Root context is only used by the status image
+.git
+.github
+kiosk
+exporters
+widget

@@ -12,13 +12,15 @@ permissions:
 
 env:
   # image name -> build context
-  CONTEXTS: '{"web":"web","kiosk":"kiosk","transmission-exporter":"exporters/transmission"}'
+  CONTEXTS: '{"web":"web","kiosk":"kiosk","transmission-exporter":"exporters/transmission","status":"."}'
+  # Dockerfile when it isn't <context>/Dockerfile
+  FILES: '{"status":"status/Dockerfile"}'
 
 jobs:
   changes:
     runs-on: ubuntu-24.04
     outputs:
-      images: ${{ github.event_name == 'workflow_dispatch' && '["web","kiosk","transmission-exporter"]' || steps.filter.outputs.changes }}
+      images: ${{ github.event_name == 'workflow_dispatch' && '["web","kiosk","transmission-exporter","status"]' || steps.filter.outputs.changes }}
     steps:
       - uses: actions/checkout@v7
       - id: filter
@@ -28,6 +30,7 @@ jobs:
             web: [web/**, .github/workflows/build.yml]
             kiosk: [kiosk/**, .github/workflows/build.yml]
             transmission-exporter: [exporters/transmission/**, .github/workflows/build.yml]
+            status: [status/**, web/events.js, .github/workflows/build.yml]
 
   image:
     needs: changes
@@ -58,6 +61,7 @@ jobs:
       - uses: docker/build-push-action@v7
         with:
           context: ${{ fromJSON(env.CONTEXTS)[matrix.image] }}
+          file: ${{ fromJSON(env.FILES)[matrix.image] || format('{0}/Dockerfile', fromJSON(env.CONTEXTS)[matrix.image]) }}
           platforms: linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}

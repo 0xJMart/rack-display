@@ -26,9 +26,15 @@ Pages (swipe): face → status tiles → per-node CPU/temp/memory → sites, bac
 
 ## Layout
 
-- `web/`: the page (one self-contained `index.html`, canvas + DOM, no build step) and an nginx
-  config that serves it and proxies **read-only** Prometheus queries (`GET /api/v1/query`,
-  `/api/v1/query_range`). Image: `ghcr.io/0xjmart/rack-display/web`.
+- `web/`: the page (`index.html`, canvas + DOM, no build step), `events.js` (queries, state, event
+  rules and face parameters, shared with the status service) and an nginx config that serves them
+  and proxies **read-only** Prometheus queries (`GET /api/v1/query`, `/api/v1/query_range`).
+  Image: `ghcr.io/0xjmart/rack-display/web`.
+- `status/`: a small Node service that runs `events.js` server-side and serves only the face's
+  state as JSON at `GET /widget/status` (bearer token), for the iPhone widget. Built from the repo
+  root. Image: `ghcr.io/0xjmart/rack-display/status`.
+- `widget/rack-face.js`: [Scriptable](https://scriptable.app) widget that draws the face and status
+  (small/StandBy, medium, Lock Screen). Paste it into Scriptable; setup notes at the top of the file.
 - `kiosk/`: Debian + [cage](https://github.com/cage-kiosk/cage) + seatd + Chromium in kiosk mode,
   run as a privileged pod on the node wired to the screen. Image: `ghcr.io/0xjmart/rack-display/kiosk`.
 
