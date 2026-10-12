@@ -128,7 +128,7 @@ function headline(s) {
 
 function addText(stack, text, size, color, opts = {}) {
   const t = stack.addText(text);
-  t.font = opts.bold ? Font.semiboldRoundedSystemFont(size) : Font.roundedSystemFont(size);
+  t.font = opts.bold ? Font.semiboldRoundedSystemFont(size) : Font.regularRoundedSystemFont(size);
   t.textColor = new Color(color);
   t.lineLimit = opts.lines || 1;
   t.minimumScaleFactor = .7;
@@ -190,7 +190,7 @@ function build(s, err, family) {
   if (s && s.updated) {
     const d = col.addDate(new Date(s.updated));
     d.applyRelativeStyle();
-    d.font = Font.roundedSystemFont(10);
+    d.font = Font.regularRoundedSystemFont(10);
     d.textColor = new Color(DIM);
   }
   return w;
