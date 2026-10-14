@@ -6,7 +6,7 @@
 // Home Screen / StandBy / Lock Screen and pick this script. Run in the app with the parameter
 // "reset" (or tap "Change token" in the menu) to replace the token.
 // Sizes: small (face + status, also what StandBy shows), medium (face + details),
-// lock screen circular (face) and rectangular (summary line).
+// lock screen circular (face) and rectangular (face + summary).
 
 const URL_STATUS = 'https://rack.joe-cloud.com/widget/status';
 const URL_OPEN = 'https://rack.joe-cloud.com/';
@@ -41,7 +41,8 @@ async function fetchStatus(token) {
 
 /* ---------------------------------- face ----------------------------------
    Same geometry as the page's draw() (web/index.html), minus glow and animation: eyes are
-   rounded rects, lids and the happy cut-out are black shapes on the black background.
+   rounded rects with the lids and the happy cut-out removed from the outline, so the
+   face also works on a transparent background (Lock Screen, tinted/clear Home Screen).
    Page units: eyes at ±sep from centre, mouth 152 below; the box below fits all emotes. */
 const FACE_W = 640, FACE_H = 380, FACE_CX = 320, FACE_CY = 150;
 
@@ -56,7 +57,6 @@ function drawFace(f, size, opts = {}) {
   const P = (x, y) => new Point(ox + x * k, oy + y * k);
   const R = (x, y, w, h) => new Rect(ox + x * k, oy + y * k, w * k, h * k);
   const col = new Color(opts.mono ? '#ffffff' : f.col, f.dim ? .65 : 1);
-  const black = new Color('#000000');
   const cx = FACE_CX, cy = FACE_CY;
 
   for (const side of [-1, 1]) {
@@ -73,27 +73,29 @@ function drawFace(f, size, opts = {}) {
       ctx.addPath(p); ctx.setStrokeColor(col); ctx.setLineWidth(30 * k); ctx.strokePath();
       continue;
     }
-    const eye = new Path();
-    const r = Math.min(f.r * .85, h / 2) * k;
-    eye.addRoundedRect(R(x0, y0, w, h), r, r);
-    ctx.addPath(eye); ctx.setFillColor(col); ctx.fillPath();
-
+    // The eye is one filled outline: the rounded rect with the lids already cut away. Lids are
+    // not painted black on top, because the Lock Screen and tinted/clear Home Screens render
+    // widgets as one translucent tone, where black shows as grey blocks instead of nothing.
+    const r = Math.min(f.r * .85, h / 2);
     // top lid: tilt > 0 = inner corner lower (angry), < 0 = outer lower (worried)
     const lidIn = y0 + (f.lid + f.tilt / 2) * h, lidOut = y0 + (f.lid - f.tilt / 2) * h;
     const yL = side < 0 ? lidOut : lidIn, yR = side < 0 ? lidIn : lidOut, slope = (yR - yL) / w;
-    if (f.lid > .01 || Math.abs(f.tilt) > .01) {
-      const lid = new Path();
-      lid.move(P(x0 - 30, y0 - 80)); lid.addLine(P(x0 + w + 30, y0 - 80));
-      lid.addLine(P(x0 + w + 30, yR + slope * 30)); lid.addLine(P(x0 - 30, yL - slope * 30));
-      lid.closeSubpath();
-      ctx.addPath(lid); ctx.setFillColor(black); ctx.fillPath();
-    }
+    const hasLid = f.lid > .01 || Math.abs(f.tilt) > .01;
     // bottom lid: an ellipse rising from below makes the happy ^ ^ shape
-    if (f.happy > .01) {
-      const ry = h * .55;
-      ctx.setFillColor(black);
-      ctx.fillEllipse(R(ex - w * .8, y0 + h - f.happy * h * .6, w * 1.6, ry * 2));
+    const hrx = w * .8, hry = h * .55, hcy = y0 + h - f.happy * h * .6 + hry;
+    const corner = x => { const d = Math.max(0, r - Math.min(x - x0, x0 + w - x)); return r - Math.sqrt(Math.max(0, r * r - d * d)); };
+    const top = [], bot = [];
+    for (let i = 0; i <= 40; i++) {
+      const x = x0 + w * i / 40, c = corner(x);
+      let t = y0 + c, b = y0 + h - c;
+      if (hasLid) t = Math.max(t, yL + slope * (x - x0));
+      if (f.happy > .01) { const u = (x - ex) / hrx; if (Math.abs(u) < 1) b = Math.min(b, hcy - hry * Math.sqrt(1 - u * u)); }
+      top.push([x, t]); bot.push([x, Math.max(t, b)]);
     }
+    const eye = new Path();
+    eye.addLines(top.concat(bot.reverse()).map(([x, y]) => P(x, y)));
+    eye.closeSubpath();
+    ctx.addPath(eye); ctx.setFillColor(col); ctx.fillPath();
   }
 
   const my = cy + 125;
@@ -113,7 +115,7 @@ function drawFace(f, size, opts = {}) {
   ctx.setTextColor(col);
   if (f.bang) { ctx.setFont(Font.heavySystemFont(110 * k)); ctx.drawText('!', P(cx + 272, cy - 150)); }
   if (f.zzz) { ctx.setFont(Font.boldRoundedSystemFont(64 * k)); ctx.drawText('z', P(cx + 230, cy - 110)); ctx.setFont(Font.boldRoundedSystemFont(44 * k)); ctx.drawText('z', P(cx + 280, cy - 150)); }
-  if (f.sweat) { ctx.setFillColor(new Color('#7fd3ff')); ctx.fillEllipse(R(cx + 278, cy - 100, 26, 38)); }
+  if (f.sweat) { ctx.setFillColor(opts.mono ? col : new Color('#7fd3ff')); ctx.fillEllipse(R(cx + 278, cy - 100, 26, 38)); }
   if (f.think) { ctx.setFillColor(col); [[238, -70, 16], [258, -108, 22], [282, -150, 30]].forEach(([x, y, d]) => ctx.fillEllipse(R(cx + x, cy + y, d, d))); }
   return ctx.getImage();
 }
@@ -152,7 +154,18 @@ function build(s, err, family) {
     img.centerAlignImage();
     return w;
   }
-  if (fam === 'accessoryRectangular' || fam === 'accessoryInline') {
+  if (fam === 'accessoryRectangular') {
+    const row = w.addStack();
+    row.centerAlignContent();
+    row.addImage(drawFace(face, { w: 240, h: 160 }, { mono: true, bg: false })).imageSize = new Size(60, 40);
+    row.addSpacer(6);
+    const col = row.addStack();
+    col.layoutVertically();
+    addText(col, s ? `${s.nodes.ready}/${s.nodes.total} nodes` : 'rack', 13, FG, { bold: true });
+    addText(col, err ? err : head.text, 12, FG, { lines: 2 });
+    return w;
+  }
+  if (fam === 'accessoryInline') {
     addText(w, s ? `rack · ${s.nodes.ready}/${s.nodes.total} nodes` : 'rack', 13, FG, { bold: true });
     addText(w, err ? err : head.text, 13, FG, { lines: 2 });
     return w;
