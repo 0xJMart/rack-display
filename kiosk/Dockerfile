@@ -8,6 +8,8 @@ RUN apt-get update \
  && groupadd -f input && groupadd -f render \
  && useradd --create-home --groups video,input,render kiosk
 COPY entrypoint.sh session.sh /usr/local/bin/
+# cage draws a cursor mid-screen even with no mouse attached; this theme makes it invisible.
+COPY blank-cursor /usr/share/icons/blank
 ENV KIOSK_URL=http://rack-display-web.rack-display.svc.cluster.local/?kiosk \
     KIOSK_ROTATE=0
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]

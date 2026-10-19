@@ -23,6 +23,7 @@ for i in $(seq 1 50); do [ -S /run/seatd.sock ] && break; sleep 0.1; done
 export LIBSEAT_BACKEND=seatd
 export WLR_LIBINPUT_NO_DEVICES=1      # still start if the touch cable isn't connected
 export WLR_NO_HARDWARE_CURSORS=1
+export XCURSOR_THEME=blank XCURSOR_SIZE=24  # see blank-cursor/
 
 # cage exits when Chromium does; the pod restarts and brings both back.
 exec runuser -u kiosk -- cage -d -- /usr/local/bin/session.sh
