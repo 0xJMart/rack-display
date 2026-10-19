@@ -32,7 +32,9 @@ Pages (swipe): face → status tiles → per-node CPU/temp/memory → sites, bac
   Image: `ghcr.io/0xjmart/rack-display/web`.
 - `status/`: a small Node service that runs `events.js` server-side and serves only the face's
   state as JSON at `GET /widget/status` (bearer token), for the iPhone widget. Built from the repo
-  root. Image: `ghcr.io/0xjmart/rack-display/status`.
+  root. Also serves `GET /public/status` (no auth, cacheable): a sanitized summary for the 3D rack on
+  joe-martinez.com, built by `status/public.js` from a field allowlist (`node --test status/`).
+  Image: `ghcr.io/0xjmart/rack-display/status`.
 - `widget/rack-face.js`: [Scriptable](https://scriptable.app) widget that draws the face and status
   (small/StandBy, medium, Lock Screen). Paste it into Scriptable; setup notes at the top of the file.
 - `kiosk/`: Debian + [cage](https://github.com/cage-kiosk/cage) + seatd + Chromium in kiosk mode,

@@ -1,6 +1,7 @@
 // Widget status service: computes the rack face's state with the page's own logic (events.js)
 // and serves only that summary as JSON, for the iPhone widget (widget/rack-face.js).
 //   GET /widget/status   Authorization: Bearer <token>   -> face state (no raw Prometheus access)
+//   GET /public/status   no auth, cacheable -> sanitized summary for the resume site (see public.js)
 //   GET /healthz
 // Env: PROMETHEUS_URL, ALERTMANAGER_URL, WIDGET_TOKEN_FILE, PORT (8081), TZ (night = 23:00–07:00 here)
 'use strict';
@@ -8,6 +9,7 @@ const http = require('http');
 const fs = require('fs');
 const crypto = require('crypto');
 const RS = require('./events.js');
+const { toPublic } = require('./public.js');
 
 const PROM = process.env.PROMETHEUS_URL || 'http://prometheus-stack-kube-prom-prometheus.monitoring.svc:9090';
 const AM = process.env.ALERTMANAGER_URL || 'http://prometheus-stack-kube-prom-alertmanager.monitoring.svc:9093';
@@ -53,13 +55,22 @@ async function poll() {
   lastOk = Date.now();
 }
 
-function status() {
+function current() {
   // No good poll in 2 minutes -> the same "can't reach Prometheus" event the page shows
   const stale = !snapshot || Date.now() - lastOk > 120_000;
   const S = snapshot ? { ...snapshot, stale } : { stale: true, pods: { bad: [] }, nodes: [], alerts: [], silenced: [], backup: {} };
   const evs = RS.events(S);
   const night = isNight();
-  const emote = RS.emoteFor(evs, night);
+  return { S, evs, night, stale, emote: RS.emoteFor(evs, night) };
+}
+
+function publicStatus() {
+  const { S, night, stale, emote } = current();
+  return toPublic(S, { emote, night, stale, updated: lastOk ? new Date(lastOk).toISOString() : null });
+}
+
+function status() {
+  const { S, evs, night, stale, emote } = current();
   const lead = evs[0] || null;
   const up = S.nodes.filter(n => n.ready);
   return {
@@ -88,13 +99,15 @@ const tokenOk = (req) => {
 
 http.createServer((req, res) => {
   const path = new URL(req.url, 'http://x').pathname;
-  const send = (code, body) => {
-    res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+  const send = (code, body, cache = 'no-store') => {
+    res.writeHead(code, { 'content-type': 'application/json', 'cache-control': cache });
     res.end(JSON.stringify(body));
   };
   // Always 200: when Prometheus is down the widget should get the "stale" face, not a 503
   if (path === '/healthz') return send(200, { polled: !!lastOk, error: lastErr || null });
   if (req.method !== 'GET') return send(405, { error: 'GET only' });
+  // Polls run every 30 s regardless of traffic, so edge caching keeps public load off Prometheus
+  if (path === '/public/status') return send(200, publicStatus(), 'public, max-age=30, s-maxage=30');
   if (path !== '/widget/status') return send(404, { error: 'not found' });
   if (!tokenOk(req)) return send(401, { error: 'unauthorized' });
   send(200, status());
