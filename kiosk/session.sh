@@ -3,9 +3,19 @@
 # Rotating in the compositor (not CSS) keeps touch input and swipes lined up with the picture.
 set -u
 
+# The screen may have no power when cage starts, or be replugged later, so keep checking and
+# rotate any output whose transform isn't the one asked for.
 if [ -n "${KIOSK_ROTATE:-}" ] && [ "$KIOSK_ROTATE" != "0" ]; then
-  out=$(wlr-randr | awk '/^[^ ]/ {print $1; exit}')
-  wlr-randr --output "$out" --transform "$KIOSK_ROTATE" || echo "rotate $out to $KIOSK_ROTATE failed" >&2
+  (
+    while :; do
+      wlr-randr 2>/dev/null | awk '/^[^ ]/ {out=$1} /^  Transform:/ {print out, $2}' |
+        while read -r out cur; do
+          [ "$cur" = "$KIOSK_ROTATE" ] && continue
+          wlr-randr --output "$out" --transform "$KIOSK_ROTATE" && echo "rotated $out to $KIOSK_ROTATE" >&2
+        done
+      sleep 5
+    done
+  ) &
 fi
 
 exec chromium \
