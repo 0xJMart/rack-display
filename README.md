@@ -39,6 +39,7 @@ Pages (swipe): face → status tiles → per-node CPU/temp/memory → sites, bac
   (small/StandBy, medium, Lock Screen). Paste it into Scriptable; setup notes at the top of the file.
 - `kiosk/`: Debian + [cage](https://github.com/cage-kiosk/cage) + seatd + Chromium in kiosk mode,
   run as a privileged pod on the node wired to the screen. Image: `ghcr.io/0xjmart/rack-display/kiosk`.
+  Set `KIOSK_ROTATE` (`90`, `180`, `270`, `flipped`…) to rotate the output in the compositor, which keeps touch lined up.
 
 - `exporters/transmission/`: a tiny stdlib-only Prometheus exporter for Transmission's RPC API
   (`transmission_up`, speeds, torrents by status, bytes left). No maintained arm64 one exists.

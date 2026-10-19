@@ -15,10 +15,4 @@ export WLR_LIBINPUT_NO_DEVICES=1      # still start if the touch cable isn't con
 export WLR_NO_HARDWARE_CURSORS=1
 
 # cage exits when Chromium does; the pod restarts and brings both back.
-exec runuser -u kiosk -- cage -d -- chromium \
-    --kiosk --ozone-platform=wayland --touch-events=enabled \
-    --noerrdialogs --disable-infobars --no-first-run --disable-translate \
-    --disable-features=TranslateUI,MediaRouter --disable-session-crashed-bubble \
-    --check-for-update-interval=31536000 --password-store=basic \
-    --user-data-dir=/tmp/chromium \
-    "$KIOSK_URL"
+exec runuser -u kiosk -- cage -d -- /usr/local/bin/session.sh
