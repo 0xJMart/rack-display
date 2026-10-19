@@ -9,7 +9,19 @@ const LABELS = {
   parity: 'NAS parity check', backup: 'backup running', fluxRec: 'GitOps reconciling', torrent: 'downloading',
 };
 
-function toPublic(S, { emote, night, updated, stale }) {
+// Uptime of the public site from its blackbox probe. Missing samples count as down: the probe runs
+// in the cluster, so a cluster outage shows up as a gap, not as failed probes.
+//   ok       successful probes in the window (sum_over_time of probe_success)
+//   samples  probes that did run (count_over_time)
+//   first    unix seconds of the earliest probe in the window
+function uptimeFrom({ ok, samples, first }, now, intervalS) {
+  if (!(samples > 0) || !Number.isFinite(first)) return null;
+  const expected = Math.max(samples, Math.floor((now - first) / intervalS) + 1);
+  const pct = Math.floor((ok / expected) * 10000) / 100; // floor: never round 99.996 up to 100
+  return { pct: Math.min(100, pct), hours: Math.round(((now - first) / 3600) * 10) / 10 };
+}
+
+function toPublic(S, { emote, night, updated, stale, uptime = null }) {
   return {
     updatedAt: updated,
     stale,
@@ -25,7 +37,8 @@ function toPublic(S, { emote, night, updated, stale }) {
     podsHealthy: S.pods.bad.length === 0,
     fluxHealthy: !(S.flux?.failed?.length),
     sitesUp: S.sites ? `${S.sites.filter(s => s.up).length}/${S.sites.length}` : null,
+    uptime: uptime && { pct: uptime.pct, hours: uptime.hours, windowDays: uptime.windowDays },
   };
 }
 
-module.exports = { toPublic, LABELS };
+module.exports = { toPublic, uptimeFrom, LABELS };

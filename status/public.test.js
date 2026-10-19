@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
-const { toPublic } = require('./public.js');
+const { toPublic, uptimeFrom } = require('./public.js');
 
 const S = {
   nodes: [
@@ -16,7 +16,7 @@ const S = {
 
 test('only allowlisted keys, values sanitized', () => {
   const p = toPublic(S, { emote: 'crash', night: false, updated: '2026-10-19T00:00:00Z', stale: false });
-  assert.deepStrictEqual(Object.keys(p).sort(), ['emote', 'fluxHealthy', 'label', 'night', 'nodes', 'podsHealthy', 'sitesUp', 'stale', 'updatedAt']);
+  assert.deepStrictEqual(Object.keys(p).sort(), ['emote', 'fluxHealthy', 'label', 'night', 'nodes', 'podsHealthy', 'sitesUp', 'stale', 'updatedAt', 'uptime']);
   assert.deepStrictEqual(Object.keys(p.nodes[0]).sort(), ['cpu', 'name', 'ready', 'temp']);
   assert.deepStrictEqual(p.nodes, [{ name: 'control-node', ready: true, cpu: 12, temp: 52 }, { name: 'node-2', ready: false, cpu: 0, temp: null }]);
   assert.strictEqual(p.podsHealthy, false);
@@ -34,4 +34,20 @@ test('leaks nothing from the full state', () => {
 
 test('unknown emotes fall back to idle', () => {
   assert.strictEqual(toPublic(S, { emote: 'weird', night: false, updated: null, stale: false }).emote, 'idle');
+});
+
+test('uptime counts missing probes as down', () => {
+  const now = 1_000_000, day = 86400;
+  // a full day of 60 s probes, all successful
+  assert.deepStrictEqual(uptimeFrom({ ok: 1441, samples: 1441, first: now - day }, now, 60), { pct: 100, hours: 24 });
+  // the cluster was down for an hour: 60 probes never ran
+  assert.strictEqual(uptimeFrom({ ok: 1381, samples: 1381, first: now - day }, now, 60).pct, 95.83);
+  // floors rather than rounding up to 100
+  assert.strictEqual(uptimeFrom({ ok: 1440, samples: 1441, first: now - day }, now, 60).pct, 99.93);
+  assert.strictEqual(uptimeFrom({ ok: 0, samples: 0, first: NaN }, now, 60), null);
+});
+
+test('uptime passes through only its numbers', () => {
+  const p = toPublic(S, { emote: 'idle', night: false, updated: null, stale: false, uptime: { pct: 99.5, hours: 12, windowDays: 7, extra: 'x' } });
+  assert.deepStrictEqual(p.uptime, { pct: 99.5, hours: 12, windowDays: 7 });
 });

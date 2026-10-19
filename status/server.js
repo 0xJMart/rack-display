@@ -2,6 +2,8 @@
 // and serves only that summary as JSON, for the iPhone widget (widget/rack-face.js).
 //   GET /widget/status   Authorization: Bearer <token>   -> face state (no raw Prometheus access)
 //   GET /public/status   no auth, cacheable -> sanitized summary for the resume site (see public.js)
+//                        incl. that site's uptime from its blackbox probe (UPTIME_URL, UPTIME_WINDOW_DAYS,
+//                        UPTIME_SINCE = go-live time, so probes from before the site was public don't count)
 //   GET /healthz
 // Env: PROMETHEUS_URL, ALERTMANAGER_URL, WIDGET_TOKEN_FILE, PORT (8081), TZ (night = 23:00–07:00 here)
 'use strict';
@@ -9,12 +11,17 @@ const http = require('http');
 const fs = require('fs');
 const crypto = require('crypto');
 const RS = require('./events.js');
-const { toPublic } = require('./public.js');
+const { toPublic, uptimeFrom } = require('./public.js');
 
 const PROM = process.env.PROMETHEUS_URL || 'http://prometheus-stack-kube-prom-prometheus.monitoring.svc:9090';
 const AM = process.env.ALERTMANAGER_URL || 'http://prometheus-stack-kube-prom-alertmanager.monitoring.svc:9093';
 const PORT = +(process.env.PORT || 8081);
 const POLL_MS = 30_000;
+const UPTIME_URL = process.env.UPTIME_URL || 'https://joe-martinez.com/';
+const UPTIME_DAYS = +(process.env.UPTIME_WINDOW_DAYS || 7);   // keep within Prometheus retention
+const UPTIME_SINCE = Date.parse(process.env.UPTIME_SINCE || '') / 1000;   // NaN = no lower bound
+const PROBE_INTERVAL_S = 60;                                     // the sites Probe's interval
+const UPTIME_MS = 5 * 60_000;
 const TOKEN = fs.readFileSync(process.env.WIDGET_TOKEN_FILE || '/etc/widget/token', 'utf8').trim();
 if (TOKEN.length < 32) throw new Error('widget token missing or shorter than 32 characters');
 
@@ -64,9 +71,25 @@ function current() {
   return { S, evs, night, stale, emote: RS.emoteFor(evs, night) };
 }
 
+let uptime = null;
+async function pollUptime() {
+  const now = Date.now() / 1000;
+  const span = Math.floor(Math.min(UPTIME_DAYS * 86400, Number.isFinite(UPTIME_SINCE) ? now - UPTIME_SINCE : Infinity));
+  if (span < PROBE_INTERVAL_S) { uptime = null; return; }
+  const sel = `probe_success{instance=${JSON.stringify(UPTIME_URL)}}`, w = `${span}s`;
+  const [ok, samples, first] = await Promise.all([
+    prom(`sum_over_time(${sel}[${w}])`),
+    prom(`count_over_time(${sel}[${w}])`),
+    prom(`min_over_time(timestamp(${sel})[${w}:1m])`),
+  ]);
+  const num = (r) => (r?.[0] ? +r[0].value[1] : NaN);
+  const u = uptimeFrom({ ok: num(ok), samples: num(samples), first: num(first) }, now, PROBE_INTERVAL_S);
+  uptime = u && { ...u, windowDays: UPTIME_DAYS };
+}
+
 function publicStatus() {
   const { S, night, stale, emote } = current();
-  return toPublic(S, { emote, night, stale, updated: lastOk ? new Date(lastOk).toISOString() : null });
+  return toPublic(S, { emote, night, stale, uptime, updated: lastOk ? new Date(lastOk).toISOString() : null });
 }
 
 function status() {
@@ -114,5 +137,7 @@ http.createServer((req, res) => {
 }).listen(PORT, () => log(`listening on :${PORT}`));
 
 poll().catch(e => log('poll:', e.message));
+pollUptime().catch(e => log('uptime:', e.message));
+setInterval(() => pollUptime().catch(e => log('uptime:', e.message)), UPTIME_MS);
 setInterval(() => poll().catch(e => log('poll:', e.message)), POLL_MS);
 process.on('SIGTERM', () => process.exit(0));
