@@ -12,7 +12,7 @@ chmod 0700 "$XDG_RUNTIME_DIR"
 # cage falls back to software rendering.
 for dev in /dev/dri/* /dev/input/event*; do
   [ -c "$dev" ] || continue
-  gid=$(stat -c %g "$dev")
+  gid=$(stat -c %g "$dev"); [ "$gid" -ne 0 ] || continue
   getent group "$gid" >/dev/null || groupadd -g "$gid" "host$gid"
   usermod -aG "$(getent group "$gid" | cut -d: -f1)" kiosk
 done
