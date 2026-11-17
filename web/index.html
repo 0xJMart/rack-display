@@ -246,9 +246,10 @@ function simTick() {
 }
 
 /* ------------------------------ live data ------------------------------ */
+const loadedAt = Date.now();
 let lastPoll = 0, pollErr = '', fluxBefore = { failed: new Set(), busy: new Set() };
 async function prom(path, params) {
-  const r = await fetch(`api/v1/${path}?` + new URLSearchParams(params), { cache: 'no-store' });
+  const r = await fetch(`api/v1/${path}?` + new URLSearchParams(params), { cache: 'no-store', signal: AbortSignal.timeout(10_000) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok || j.status !== 'success') throw new Error(j.error || `HTTP ${r.status}`);
   return j.data.result;
@@ -256,7 +257,7 @@ async function prom(path, params) {
 
 // Alertmanager knows about silences and inhibitions; Prometheus' ALERTS series doesn't.
 async function amAlerts() {
-  const r = await fetch('alertmanager/api/v2/alerts?active=true&silenced=true&inhibited=true', { cache: 'no-store' });
+  const r = await fetch('alertmanager/api/v2/alerts?active=true&silenced=true&inhibited=true', { cache: 'no-store', signal: AbortSignal.timeout(10_000) });
   if (!r.ok) throw new Error(`alertmanager HTTP ${r.status}`);
   return (await r.json()).map(a => ({ labels: a.labels, suppressed: a.status.state === 'suppressed' }));
 }
@@ -298,7 +299,8 @@ async function liveHistory() {
 const SHORT = { crash: 'crashloop', nodeDown: 'node down', alarm: 'site', backupFail: 'backup failed', fluxFail: 'flux failed',
   hot: 'hot', cpu: 'cpu', parity: 'parity', backup: 'backup', fluxRec: 'flux', torrent: 'torrents', stale: 'no data' };
 
-const events = () => RackState.events(S);
+// No good poll in 2 minutes -> stale, like the status service, so a stuck browser can't keep showing old events
+const events = () => RackState.events(MOCK ? S : { ...S, stale: S.stale || Date.now() - lastPoll > 120_000 });
 
 function isNight() {
   if (timeMode !== 'auto') return timeMode === 'night';
@@ -829,6 +831,8 @@ if (MOCK) for (let i = 0; i < HIST; i++) simTick();      // pre-fill history so 
 else {
   livePoll().then(liveHistory);
   setInterval(livePoll, 15_000);
+  // Still nothing after 10 minutes (e.g. Chromium's network stack wedged): reload the page
+  setInterval(() => { if (Date.now() - (lastPoll || loadedAt) > 600_000) location.reload(); }, 60_000);
   setInterval(liveHistory, 60_000);
 }
 tick(); syncDebug();
