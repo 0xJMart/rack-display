@@ -14,7 +14,10 @@ COPY blank-cursor /usr/share/icons/blank
 # falls back to Adwaita and shows up, so point every name Adwaita has at the blank one.
 RUN for c in /usr/share/icons/Adwaita/cursors/*; do \
       n=$(basename "$c"); [ -e "/usr/share/icons/blank/cursors/$n" ] || ln -s left_ptr "/usr/share/icons/blank/cursors/$n"; \
-    done
+    done \
+ # cage (and libwayland-cursor without a theme name) load the "default" theme, not XCURSOR_THEME,
+ # and Debian's default inherits Adwaita, so make default blank too.
+ && printf '[Icon Theme]\nInherits=blank\n' > /usr/share/icons/default/index.theme
 ENV KIOSK_URL=http://rack-display-web.rack-display.svc.cluster.local/?kiosk \
     KIOSK_ROTATE=0
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
